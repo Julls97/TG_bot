@@ -72,7 +72,7 @@ questions = [
             "— Продолжите стихотворение, добавив ещё одну рифмованную строчку.\n\n"
             "3. Задание поочерёдно передаётся всем участникам команды, каждый добавляет свою строчку, развивая общее стихотворение."
         ],
-        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=20)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=00)
     },
 ]
 
@@ -98,7 +98,6 @@ class InteractiveBot:
         ])
 
         self.scheduler = AsyncIOScheduler() # Инициализация планировщика
-        # self.schedule_all_blocks()
         self._register_handlers()
 
     def _init_db(self):
@@ -122,10 +121,6 @@ class InteractiveBot:
             )
         """)
         self.conn.commit()
-
-    ### 3. Добавьте функцию для отложенной отправки сообщения
-    # async def send_scheduled_message(self, chat_id, text):
-    #     await self.bot.send_message(chat_id, text)
 
     def _register_handlers(self):
         @self.router.message(Command("start"))
@@ -204,14 +199,65 @@ class InteractiveBot:
                 await state.update_data(block_step=step, answers=answers)
                 await message.answer(questions_block[step])
             else:
+                # 1. Сохраняем ответы на только что завершённый блок
                 await self.save_answers(answers, state)
-                await message.answer("Спасибо за ваши ответы! Они записаны.\nЖдите следующий блок по расписанию.")
-                await state.clear()
-                # В таблице обновляем current_block на следующий
+                await message.answer("Спасибо за ваши ответы! Они записаны. Ждите следующий блок по расписанию.")
+
+                # 2. Подготавливаем данные для следующего блока
                 user = message.from_user
-                self.cur.execute("UPDATE answers SET current_block=? WHERE chat_id=? and user_id=?",(quiz_index+1,message.chat.id,user.id))
-                self.conn.commit()
-                await self.try_start_next_block(user.id, message.chat.id, quiz_index + 1)
+                next_quiz_index = quiz_index + 1
+                now = datetime.now()
+
+                # 3. Проверяем, существует ли следующий блок и настало ли его время
+                # (Это дублирует часть логики try_start_next_block, но критично для правильного порядка)
+                next_block_data = None
+                if next_quiz_index < len(questions):
+                    potential_next_block = questions[next_quiz_index]
+                    # Проверяем время (можно убрать, если логика вызова next_question гарантирует это)
+                    if potential_next_block["time"] <= now:
+                        next_block_data = potential_next_block
+
+                if next_block_data:
+                    # 4. Если следующий блок найден и доступен
+                    next_questions_block = next_block_data["text"]
+
+                    # 5. !!! КРИТИЧЕСКИ ВАЖНО !!!
+                    # Сначала ОБНОВЛЯЕМ БД с новым current_block
+                    self.cur.execute(
+                        "UPDATE answers SET current_block=? WHERE chat_id=? AND user_id=?",
+                        (next_quiz_index, message.chat.id, user.id)
+                    )
+                    self.conn.commit()
+
+                    # 6. !!! КРИТИЧЕСКИ ВАЖНО !!!
+                    # Потом ОЧИЩАЕМ состояние (это безопасно, так как следующие действия синхронны)
+                    await state.clear()
+
+                    # 7. !!! КРИТИЧЕСКИ ВАЖНО !!!
+                    # Устанавливаем НОВОЕ состояние и данные ДО отправки любого сообщения
+                    await state.set_data({
+                        "block_questions": next_questions_block,
+                        "block_step": 0,
+                        "answers": [],  # Начинаем собирать ответы для нового блока
+                        "quiz_index": next_quiz_index,
+                    })
+                    await state.set_state(State.asking)  # <-- Состояние установлено
+
+                    # 8. !!! КРИТИЧЕСКИ ВАЖНО !!!
+                    # Отправляем сообщения ТОЛЬКО ПОСЛЕ установки состояния
+                    await message.answer("Ура! Новый блок вопросов")
+                    await message.answer(next_questions_block[0])  # <-- Первый вопрос нового блока
+
+                else:
+                    # Если следующего блока нет или время не пришло
+                    # Обновляем БД
+                    self.cur.execute(
+                        "UPDATE answers SET current_block=? WHERE chat_id=? AND user_id=?",
+                        (next_quiz_index, message.chat.id, user.id)
+                    )
+                    self.conn.commit()
+                    # Очищаем состояние, так как блоков больше нет или они еще не наступили
+                    await state.clear()
 
 # -----------------------------------------------------------------------------------------------------------------
 
