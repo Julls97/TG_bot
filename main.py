@@ -15,7 +15,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta,date
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,20 +39,20 @@ questions = [
             "Что ты запомнил из сегодняшнего выступления Андреева Дмитрия? Напишите ключевую мысль.",
             "По твоему мнению, какое самое важное достижение у компании за этот год и почему?"
         ],
-        "time": datetime.today() + timedelta(hours=9, minutes=55)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
     },
     {
         "text": [
             "Сделайте и отправьте креативную фотографию с коллегой с которым чаще всего взаимодействуешь по работе (приветствуется использование ИИ)."
         ],
-        "time": datetime.today() + timedelta(hours=12, minutes=30)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=12, minutes=30)
     },
     {
         "text": [
             "Какой продукт нашей компании тебе нравится больше всего и почему?\nОпиши, что именно в этом продукте привлекает тебя — будь то функциональность, дизайн, польза для клиентов или что-то ещё. Постарайся раскрыть свои личные впечатления и причины выбора.",
             "С помощью ИИ сгенерируй и направь сюда ответ с нестандартными способами использования продукта, о котором ты писал(а) выше, выходящими за рамки его традиционного применения."
         ],
-        "time": datetime.today() + timedelta(hours=14, minutes=00)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=14, minutes=00)
     },
     {
         "text": [
@@ -60,7 +60,7 @@ questions = [
             "Как бы вы переосмыслили одно из ключевых правил Agile, чтобы оно отражало не только гибкость и скорость, но и вдохновение и творческий подход в работе команды?",
             "Расшифруйте ребус из эмодзи и напишите, какое Agile-понятие или практика здесь изображены\n 🐢📅🛠",
         ],
-        "time": datetime.today() + timedelta(hours=14, minutes=30)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=14, minutes=30)
     },
     {
         "text": [
@@ -72,7 +72,7 @@ questions = [
             "— Продолжите стихотворение, добавив ещё одну рифмованную строчку.\n\n"
             "3. Задание поочерёдно передаётся всем участникам команды, каждый добавляет свою строчку, развивая общее стихотворение."
         ],
-        "time": datetime.today() + timedelta(hours=16, minutes=00)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=20)
     },
 ]
 
@@ -98,6 +98,7 @@ class InteractiveBot:
         ])
 
         self.scheduler = AsyncIOScheduler() # Инициализация планировщика
+        # self.schedule_all_blocks()
         self._register_handlers()
 
     def _init_db(self):
@@ -116,14 +117,15 @@ class InteractiveBot:
                 full_name TEXT,
                 fio TEXT,
                 team TEXT,
+                current_block INTEGER,
                 {answers_cols}
             )
         """)
         self.conn.commit()
 
     ### 3. Добавьте функцию для отложенной отправки сообщения
-    async def send_scheduled_message(self, chat_id, text):
-        await self.bot.send_message(chat_id, text)
+    # async def send_scheduled_message(self, chat_id, text):
+    #     await self.bot.send_message(chat_id, text)
 
     def _register_handlers(self):
         @self.router.message(Command("start"))
@@ -185,56 +187,31 @@ class InteractiveBot:
             await callback.message.edit_reply_markup(reply_markup=None)
             await callback.message.answer("Погнали! 🚀")
             await self.start_quiz(callback.message, state)
+            self.schedule_all_blocks()
 
-        # @self.router.message(State.asking)
-        # async def next_question(message: types.Message, state: FSMContext):
-        #     data = await state.get_data()
-        #     questions_block = data.get("block_questions", [])
-        #     step = data.get("block_step", 0)
-        #     answers = data.get("answers", [])
-        #
-        #     # --- Обработка фото-вопроса (например, 3-й блок, 1-й вопрос)
-        #     photo_question_index = (len(questions[0]["text"]) + len(questions[1]["text"]))  # позиция фото-вопроса в общем списке
-        #     is_photo_q = step + sum(len(q["text"]) for q in questions[:2]) == photo_question_index
-        #
-        #     if is_photo_q and message.photo:
-        #         photo_id = message.photo[-1].file_id  # берём лучшее качество
-        #         answers.append(f"[photo:{photo_id}]")
-        #         row_id = data.get("row_id")
-        #         # photo_1 соответствует нашему вопросу (можно привязать по step, если фото вопросов несколько)
-        #         self.cur.execute("UPDATE answers SET photo=? WHERE id=?", (photo_id, row_id))
-        #         self.conn.commit()
-        #         step += 1
-        #     else:
-        #         answers.append(message.text)
-        #         step += 1
-        #
-        #     if step < len(questions_block):
-        #         await state.update_data(block_step=step, answers=answers)
-        #         await message.answer(questions_block[step])
-        #     else:
-        #         await self.save_answers(answers, state)
-        #         await message.answer("Спасибо за ваши ответы! Они записаны.\nЖди следующих сообщений")
-        #         await state.clear()
-
-# -----------------------------------------------------------------------------------------------------------------
         @self.router.message(State.asking)
         async def next_question(message: types.Message, state: FSMContext):
             data = await state.get_data()
-
             questions_block = data.get("block_questions", [])
             step = data.get("block_step", 0)
             answers = data.get("answers", [])
+            quiz_index = data.get("quiz_index", 0)
+
             answers.append(message.text)
             step += 1
 
             if step < len(questions_block):
-                await message.answer(questions_block[step])
                 await state.update_data(block_step=step, answers=answers)
+                await message.answer(questions_block[step])
             else:
                 await self.save_answers(answers, state)
-                await message.answer("Спасибо за ваши ответы! Они записаны.\nЖди следующих сообщений")
+                await message.answer("Спасибо за ваши ответы! Они записаны.\nЖдите следующий блок по расписанию.")
                 await state.clear()
+                # В таблице обновляем current_block на следующий
+                user = message.from_user
+                self.cur.execute("UPDATE answers SET current_block=? WHERE chat_id=? and user_id=?",(quiz_index+1,message.chat.id,user.id))
+                self.conn.commit()
+                await self.try_start_next_block(user.id, message.chat.id, quiz_index + 1)
 
 # -----------------------------------------------------------------------------------------------------------------
 
@@ -307,9 +284,9 @@ class InteractiveBot:
 
         @self.router.message(Command("run_block"))
         async def start_block_quiz(message: Message, state: FSMContext):
-            # if message.from_user.id != ADMIN_ID:
-            #     await message.answer("У вас нет доступа к запуску блока.")
-            #     return
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к запуску блока.")
+                return
             data = await state.get_data()
             block_index = data.get("quiz_index", 0)
             if len(message.text.strip().split()) == 2:
@@ -339,20 +316,20 @@ class InteractiveBot:
 
             await message.answer(f"❗‍INFO❗‍\nБлок #{block_index} запущен для {count} пользователей.")
 
-        @self.router.message(Command("remind"))
-        async def remind_example(message: Message):
-            if message.from_user.id != ADMIN_ID:
-                await message.answer("У вас нет доступа к напоминаниям.")
-                return
-            run_time = datetime(2025, 8, 7, 18, 14, 30)
-            await message.answer("Через минуту это сообщение напомнит о себе!")
-            # Через минуту придет напоминание
-            self.scheduler.add_job(
-                self.send_scheduled_message,
-                "date",
-                run_date=run_time,
-                args=[message.chat.id, "Прошла минута: напоминаем о себе! 😉"]
-            )
+        # @self.router.message(Command("remind"))
+        # async def remind_example(message: Message):
+        #     if message.from_user.id != ADMIN_ID:
+        #         await message.answer("У вас нет доступа к напоминаниям.")
+        #         return
+        #     run_time = datetime(2025, 8, 7, 18, 14, 30)
+        #     await message.answer("Через минуту это сообщение напомнит о себе!")
+        #     # Через минуту придет напоминание
+        #     self.scheduler.add_job(
+        #         self.send_scheduled_message,
+        #         "date",
+        #         run_date=run_time,
+        #         args=[message.chat.id, "Прошла минута: напоминаем о себе! 😉"]
+        #     )
 
 # -----------------------------------------------------------------------------------------------------------------
 
@@ -400,27 +377,50 @@ class InteractiveBot:
         index += 1
         await state.update_data(quiz_index=index)  # Сохраняем обновлённый индекс
 
-        # # Логика перехода или завершения
-        # if index < len(questions):
-        #     block = questions[index]["text"]
-        #     await state.update_data(block_questions=block, step=0, answers=[])
-        #     # Отправляем следующий блок вопросов
-        #     await self.bot.send_message(
-        #         chat_id=row_id,  # Или используйте message.from_user.id или аналогично, если есть access к message
-        #         text=block[0]
-        #     )
-        #     await state.set_state(State.asking)
-        # else:
-        #     # Закончились вопросы
-        #     await self.bot.send_message(
-        #         chat_id=row_id,
-        #         text="На этом вопросы закончились! Спасибо за участие."
-        #     )
-        #     await state.clear()
-
     def get_all_answers(self):
         self.cur.execute("SELECT * FROM answers")
         return self.cur.fetchall()
+
+    def schedule_all_blocks(self):
+        self.scheduler.add_job(self.timer_block_run, "interval", minutes=1)
+
+    async def timer_block_run(self):
+        self.cur.execute("SELECT DISTINCT chat_id, user_id, current_block FROM answers WHERE chat_id IS NOT NULL")
+        users = self.cur.fetchall()
+        for chat_id, user_id, current_block in users:
+            await self.try_start_next_block(user_id, chat_id, current_block)
+
+    async def try_start_next_block(self, user_id, chat_id, current_block):
+        now = datetime.now()
+        # Проверяем, что пользователь завершил предыдущий блок и не находится в незавершённом:
+        state = FSMContext(self.dp.storage, (chat_id, user_id))
+        fsm_state = await state.get_state()
+
+        # Пользователь в процессе: не запускаем новый блок
+        if fsm_state == State.asking.state:
+            return
+
+        # Проверим все доступные по времени блоки, которые пользователь ещё не прошёл
+        for block_index, block in enumerate(questions):
+            if (block["time"] <= now) and ((current_block or 0) <= block_index):
+                # стартуем этот незавершённый и доступный по времени блок
+                questions_block = block["text"]
+                await state.set_data({
+                    "block_questions": questions_block,
+                    "block_step": 0,
+                    "answers": [],
+                    "quiz_index": block_index,
+                })
+
+                await state.set_state(State.asking)
+                await self.bot.send_message(chat_id, f"Ура! Новый блок вопросов")
+                await self.bot.send_message(chat_id, f"{questions_block[0]}")
+
+                # В базе фиксируем, что пользователь пришёл в этот блок
+                self.cur.execute("UPDATE answers SET current_block=? WHERE chat_id=? AND user_id=?",
+                                 (block_index, chat_id, user_id))
+                self.conn.commit()
+                break  # Останавливаемся — запускаем только первый незавершённый доступный блок
 
     async def main(self):
         self.scheduler.start()
@@ -428,5 +428,5 @@ class InteractiveBot:
 
 
 if __name__ == "__main__":
-    bot1 = InteractiveBot(API_TOKEN)
-    asyncio.run(bot1.main())
+    tg_bot = InteractiveBot(API_TOKEN)
+    asyncio.run(tg_bot.main())
