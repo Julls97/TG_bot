@@ -13,6 +13,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta, date
 
+import gspread
+from google.oauth2.service_account import Credentials
+
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
@@ -72,7 +75,6 @@ questions = [
     },
 ]
 
-# ----------------- Состояния -------------------
 class State(StatesGroup):
     waiting_for_fio = State()
     waiting_for_team = State()
@@ -87,6 +89,14 @@ class InteractiveBot:
         self.router = Router()
         self.dp.include_router(self.router)
         self._init_db()
+
+        self.admin_export = AdminExport(
+            bot=self.bot,
+            cur=self.cur,
+            admin_id=ADMIN_ID,
+            creds_json_path="config/service_account.json",
+            spreadsheet_id="1MQMhgMeI5B1zjK-UcPhVGVBHFer5HUMdnyvs0A5FayU"
+        )
 
         self.keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Красный", callback_data="team_Красный")],
@@ -119,11 +129,15 @@ class InteractiveBot:
         self.conn.commit()
 
     def _register_handlers(self):
-
         @self.router.message(Command("start"))
         async def cmd_start(message: Message, state: FSMContext):
             await self.name(message)
             await state.set_state(State.waiting_for_fio)
+
+        @self.router.message(Command("stop"))
+        async def stop_cmd(message: Message, state: FSMContext):
+            await state.clear()
+            await message.answer("Сессия сброшена.")
 
         @self.router.message(State.waiting_for_fio)
         async def registration(message: types.Message, state: FSMContext):
@@ -152,6 +166,11 @@ class InteractiveBot:
             await callback.message.edit_reply_markup(reply_markup=None)
             await callback.message.answer(f"Вы выбрали вариант: {choice}")
             await self.run_quiz(callback.message, state)
+
+        @self.router.message(State.waiting_for_team)
+        async def error_on_team(message: Message):
+            # Если человек отправил текст, а не нажал кнопку
+            await message.answer("Пожалуйста, выберите вариант с помощью кнопки!")
 
         @self.router.callback_query(State.waiting_for_run_quiz)
         async def registration_complete(callback: CallbackQuery, state: FSMContext):
@@ -207,6 +226,114 @@ class InteractiveBot:
                     await message.answer(next_block_data[0])
                 else:
                     await state.clear()
+
+# -----------------------------------------------------------------------------------------------------------------
+        @self.router.message(Command("help_admin"))
+        async def admin_help_cmd(message: Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к админ-командам.")
+                return
+            text = (
+                "👩‍💼👨‍💼‍ <b>Доступные команды администратора</b>:\n\n"
+                "/results — вывести все результаты пользователей\n"
+                "/quiz_list — список блоков вопросов\n"
+                "/block [номер_блока] — посмотреть вопросы из выбранного блока\n"
+                "/run_block — запустить блок опроса вручную\n"
+                "/remind — тестовое напоминание по времени\n"
+                "/export — выгрузка в таблицу\n"
+                # Добавьте свои команды ниже по мере необходимости:
+                # "/start_auto_quiz — авто-рассылка вопросов по времени\n"
+                # "/delete_all — удалить все ответы из базы\n"
+                "/help_admin — список админ-команд\n"
+            )
+            await message.answer(text, parse_mode="HTML")
+
+        @self.router.message(Command("results"))
+        async def view_results(message: types.Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к просмотру результатов.")
+                return
+            all_results = self.get_all_answers()
+            if not all_results:
+                await message.answer("Ответов пока нет.")
+                return
+            text = ""
+            for idx, row in enumerate(all_results, 1):
+                # row: (id, user_id, username, full_name, answer_1, answer_2, answer_3, ...)
+                user_info = f"{row[3]} (@{row[2]})"
+                num_questions = sum(len(block["text"]) for block in questions)
+                answers = [f"{i + 1}: {row[4 + i]}" for i in range(num_questions)]
+                text += f"{idx}. {user_info}\n" + "\n".join(answers) + "\n\n"
+            # Если строк много — отправить частями
+            for chunk in [text[i:i + 4000] for i in range(0, len(text), 4000)]:
+                await message.answer(chunk)
+
+        @self.router.message(Command("quiz_list"))
+        async def list_blocks_cmd(message: Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к просмотру вопросов.")
+                return
+            text = "Список блоков:\n"
+            for idx, block in enumerate(questions):
+                block_title = block.get("title", f"Блок №{idx + 1}")
+                text += f"{block_title} — {len(block['text'])}\n"
+            await message.answer(text)
+
+        @self.router.message(Command("block"))
+        async def show_block_idx(message: Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к просмотру блоков заданий.")
+                return
+            parts = message.text.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                await message.answer("Используй: /block <номер_блока>")
+                return
+            idx = int(parts[1])
+            if 0 <= idx < len(questions):
+                block = questions[idx]["text"]
+                result = "\n".join([f"{i + 1}. {q}" for i, q in enumerate(block)])
+                await message.answer(f"Вопросы к блоку #{idx}\n{result}")
+            else:
+                await message.answer("Нет такого блока.")
+
+        @self.router.message(Command("run_block"))
+        async def start_block_quiz(message: Message, state: FSMContext):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к запуску блока.")
+                return
+            data = await state.get_data()
+            block_index = data.get("quiz_index", 0)
+            if len(message.text.strip().split()) == 2:
+                # Позволяет запускать конкретный блок: /run_block 0
+                try:
+                    block_index = int(message.text.strip().split()[1])
+                except ValueError:
+                    pass
+            if block_index < 0 or block_index >= len(questions):
+                await message.answer("Нет такого блока.")
+                return
+
+            # Получить всех уникальных пользователей (chat_id, user_id)
+            self.cur.execute("SELECT DISTINCT chat_id, user_id FROM answers WHERE chat_id IS NOT NULL")
+            users = self.cur.fetchall()
+            if not users:
+                await message.answer("Нет зарегистрированных участников.")
+                return
+
+            count = 0
+            for chat_id, user_id in users:
+                questions_block = questions[block_index]["text"]
+                await state.update_data(block_questions=questions_block, block_step=0, answers=[])
+                await self.bot.send_message(chat_id, f"{questions_block[0]}")
+                await state.set_state(State.asking)
+                count += 1
+
+            await message.answer(f"❗‍INFO❗‍\nБлок #{block_index} запущен для {count} пользователей.")
+
+        @self.router.message(Command("export"))
+        async def export_data(message: Message, state: FSMContext):
+            await self.admin_export.export_to_sheet(message)
+    # -----------------------------------------------------------------------------------------------------------------
 
     async def name(self, message: Message):
         await message.answer("Дорогой коллега, приветствую тебя в корпоративной игре, которая проводится в рамках мероприятия «Традиции и трансформация». 🎉")
@@ -271,11 +398,7 @@ class InteractiveBot:
     async def timer_block_run(self):
         self.cur.execute("SELECT chat_id, user_id, current_block FROM answers")
         for chat_id, user_id, current_block in self.cur.fetchall():
-            if current_block >= len(questions) - 1 and hasattr(self, 'job'):  # Если все завершили, отменяем задачу
-                self.job.remove()
-                logging.info("Все блоки пройдены, задача планировщика остановлена.")
-            else:
-                await self.try_start_next_block(user_id=user_id, chat_id=chat_id, current_block=current_block)
+            await self.try_start_next_block(user_id=user_id, chat_id=chat_id, current_block=current_block)
 
     async def try_start_next_block(self, chat_id, user_id, current_block):
         now = datetime.now()
@@ -305,6 +428,48 @@ class InteractiveBot:
     async def main(self):
         self.scheduler.start()
         await self.dp.start_polling(self.bot)
+
+class AdminExport:
+    def __init__(self, bot: Bot, cur: sqlite3.Cursor, admin_id: int,
+                 creds_json_path: str, spreadsheet_id: str):
+        self.bot = bot
+        self.cur = cur
+        self.admin_id = admin_id
+        self.spreadsheet_id = spreadsheet_id
+        self.creds_json_path = creds_json_path
+
+        # Авторизация в Google Sheets
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(self.creds_json_path, scopes=scopes)
+        self.gc = gspread.authorize(creds)
+
+    def _get_all_answers_data(self):
+        # Берем все строки из таблицы answers
+        self.cur.execute("SELECT * FROM answers")
+        columns = [desc[0] for desc in self.cur.description]
+        rows = self.cur.fetchall()
+        # Формируем список списков, первая строка - заголовки
+        data = [columns]
+        for row in rows:
+            # Конвертация всех значений в строку (Google Sheets API требует строки/числа)
+            data.append([str(cell) if cell is not None else "" for cell in row])
+        return data
+
+    async def export_to_sheet(self, message: Message):
+        # Проверяем, что пишет админ
+        if message.from_user.id != self.admin_id:
+            await message.answer("У вас нет прав на выполнение этой команды.")
+            return
+
+        try:
+            sheet = self.gc.open_by_key(self.spreadsheet_id).sheet1  # Можно выбрать нужный лист
+            data = self._get_all_answers_data()
+            sheet.clear()  # Чистим лист перед загрузкой
+            sheet.update('A1', data)  # Загружаем данные начиная с ячейки A1
+            await message.answer("Данные успешно экспортированы в Google Таблицу.")
+        except Exception as e:
+            await message.answer(f"Произошла ошибка при экспорте: {e}")
+            logging.exception("Ошибка при экспорте в Google Sheets")
 
 
 if __name__ == "__main__":
