@@ -75,7 +75,7 @@ questions = [
     },
 ]
 
-class State(StatesGroup):
+class BotState(StatesGroup):
     waiting_for_fio = State()
     waiting_for_team = State()
     waiting_for_run_quiz = State()
@@ -106,128 +106,69 @@ class InteractiveBot:
         ])
 
         self.scheduler = AsyncIOScheduler()
+        # Словарь для отслеживания активных блоков пользователей
+        self.active_blocks = {}
         self._register_handlers()
 
     def _init_db(self):
         self.conn = sqlite3.connect('quiz_answers.db')
         self.cur = self.conn.cursor()
-        num_questions = sum(len(block["text"]) for block in questions)
-        answers_cols = ', '.join([f"answer_{i+1} TEXT" for i in range(num_questions)])
-        self.cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS answers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                chat_id INTEGER,
-                username TEXT,
-                full_name TEXT,
-                fio TEXT,
-                team TEXT,
-                current_block INTEGER,
-                {answers_cols}
-            )
-        """)
+
+        # Проверяем существование таблицы
+        self.cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='answers'")
+        table_exists = self.cur.fetchone()
+
+        if not table_exists:
+            # Создаем новую таблицу
+            num_questions = sum(len(block["text"]) for block in questions)
+            answers_cols = ', '.join([f"answer_{i + 1} TEXT" for i in range(num_questions)])
+            self.cur.execute(f"""
+                CREATE TABLE answers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    chat_id INTEGER,
+                    username TEXT,
+                    full_name TEXT,
+                    fio TEXT,
+                    team TEXT,
+                    current_block INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 0,
+                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    {answers_cols}
+                )
+            """)
+        else:
+            # Проверяем и добавляем недостающие столбцы
+            self.cur.execute("PRAGMA table_info(answers)")
+            columns = [column[1] for column in self.cur.fetchall()]
+
+            if 'is_active' not in columns:
+                self.cur.execute("ALTER TABLE answers ADD COLUMN is_active INTEGER DEFAULT 0")
+                logging.info("Добавлен столбец is_active")
+
+            if 'last_activity' not in columns:
+                self.cur.execute("ALTER TABLE answers ADD COLUMN last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                logging.info("Добавлен столбец last_activity")
+
+            if 'current_block' not in columns:
+                self.cur.execute("ALTER TABLE answers ADD COLUMN current_block INTEGER DEFAULT 0")
+                logging.info("Добавлен столбец current_block")
+
         self.conn.commit()
 
     def _register_handlers(self):
+        # 1. ОСНОВНЫЕ КОМАНДЫ (самые приоритетные)
         @self.router.message(Command("start"))
         async def cmd_start(message: Message, state: FSMContext):
             await self.name(message)
-            await state.set_state(State.waiting_for_fio)
+            await state.set_state(BotState.waiting_for_fio)
 
         @self.router.message(Command("stop"))
         async def stop_cmd(message: Message, state: FSMContext):
             await state.clear()
             await message.answer("Сессия сброшена.")
 
-        @self.router.message(State.waiting_for_fio)
-        async def registration(message: types.Message, state: FSMContext):
-            fio = message.text
-            user = message.from_user
-            chat_id = message.chat.id
-            self.cur.execute(
-                "INSERT INTO answers (user_id, chat_id, username, full_name, fio, team) VALUES (?, ?, ?, ?, ?, ?)",
-                (user.id, chat_id, user.username or "", user.full_name or "", fio, "")
-            )
-            self.conn.commit()
-            await state.update_data(
-                fio=fio, chat_id=chat_id, user_id=user.id
-            )
-            await message.answer(f"Отлично, {fio}")
-            await self.team(message, state)
-
-        @self.router.callback_query(State.waiting_for_team)
-        async def setup_team(callback: types.CallbackQuery, state: FSMContext):
-            choice = callback.data.split("_")[1]
-            data = await state.get_data()
-            chat_id, user_id = data["chat_id"], data["user_id"]
-            self.cur.execute("UPDATE answers SET team=? WHERE chat_id=? AND user_id=?", (choice, chat_id, user_id))
-            self.conn.commit()
-            await state.update_data(team=choice)
-            await callback.message.edit_reply_markup(reply_markup=None)
-            await callback.message.answer(f"Вы выбрали вариант: {choice}")
-            await self.run_quiz(callback.message, state)
-
-        @self.router.message(State.waiting_for_team)
-        async def error_on_team(message: Message):
-            # Если человек отправил текст, а не нажал кнопку
-            await message.answer("Пожалуйста, выберите вариант с помощью кнопки!")
-
-        @self.router.callback_query(State.waiting_for_run_quiz)
-        async def registration_complete(callback: CallbackQuery, state: FSMContext):
-            await callback.message.edit_reply_markup(reply_markup=None)
-            await callback.message.answer("Погнали! 🚀")
-            await self.start_quiz(callback.message, state)
-            self.schedule_all_blocks()
-
-        @self.router.message(State.asking)
-        async def next_question(message: types.Message, state: FSMContext):
-            data = await state.get_data()
-            questions_block = data.get("block_questions", [])
-            step = data.get("block_step", 0)
-            answers = data.get("answers", [])
-            quiz_index = data.get("quiz_index", 0)
-
-            current_question = questions_block[step]
-
-            photo_question_text = (
-                "Сделайте и отправьте креативную фотографию с коллегой с которым чаще всего взаимодействуешь по работе (приветствуется использование ИИ)."
-            )
-            if current_question.strip() == photo_question_text.strip():
-                if not message.photo:
-                    await message.answer("Пожалуйста, отправьте фото 📷")
-                    return
-                answers.append(f"photo_file_id:{message.photo[-1].file_id}")
-            else:
-                answers.append(message.text)
-
-            step += 1
-            if step < len(questions_block):
-                await state.update_data(block_step=step, answers=answers)
-                await message.answer(questions_block[step])
-            else:
-                await state.update_data(answers=answers)
-                await self.save_answers(message, answers, state)
-                await message.answer("Спасибо за ваши ответы! Они записаны. Ждите следующий блок по расписанию.")
-
-                next_quiz_index = quiz_index + 1
-                now = datetime.now()
-                if next_quiz_index < len(questions) and questions[next_quiz_index]["time"] <= now:
-                    next_block_data = questions[next_quiz_index]["text"]
-                    await state.clear()
-                    await state.update_data(
-                        chat_id=message.chat.id,
-                        user_id=message.from_user.id,
-                        block_questions=next_block_data,
-                        block_step=0,
-                        answers=[],
-                        quiz_index=next_quiz_index
-                    )
-                    await state.set_state(State.asking)
-                    await message.answer(next_block_data[0])
-                else:
-                    await state.clear()
-
-# -----------------------------------------------------------------------------------------------------------------
+        # 2. ВСЕ АДМИНСКИЕ КОМАНДЫ (до обработчиков состояний и универсального обработчика)
         @self.router.message(Command("help_admin"))
         async def admin_help_cmd(message: Message):
             if message.from_user.id != ADMIN_ID:
@@ -238,13 +179,9 @@ class InteractiveBot:
                 "/results — вывести все результаты пользователей\n"
                 "/quiz_list — список блоков вопросов\n"
                 "/block [номер_блока] — посмотреть вопросы из выбранного блока\n"
-                "/run_block — запустить блок опроса вручную\n"
-                "/remind — тестовое напоминание по времени\n"
+                # "/run_block — запустить блок опроса вручную\n"
                 "/export — выгрузка в таблицу\n"
                 "/download_all_photos — выгрузка в таблицу\n"
-                # Добавьте свои команды ниже по мере необходимости:
-                # "/start_auto_quiz — авто-рассылка вопросов по времени\n"
-                # "/delete_all — удалить все ответы из базы\n"
                 "/help_admin — список админ-команд\n"
             )
             await message.answer(text, parse_mode="HTML")
@@ -260,12 +197,10 @@ class InteractiveBot:
                 return
             text = ""
             for idx, row in enumerate(all_results, 1):
-                # row: (id, user_id, username, full_name, answer_1, answer_2, answer_3, ...)
                 user_info = f"{row[3]} (@{row[2]})"
                 num_questions = sum(len(block["text"]) for block in questions)
                 answers = [f"{i + 1}: {row[4 + i]}" for i in range(num_questions)]
                 text += f"{idx}. {user_info}\n" + "\n".join(answers) + "\n\n"
-            # Если строк много — отправить частями
             for chunk in [text[i:i + 4000] for i in range(0, len(text), 4000)]:
                 await message.answer(chunk)
 
@@ -297,39 +232,35 @@ class InteractiveBot:
             else:
                 await message.answer("Нет такого блока.")
 
-        @self.router.message(Command("run_block"))
-        async def start_block_quiz(message: Message, state: FSMContext):
-            if message.from_user.id != ADMIN_ID:
-                await message.answer("У вас нет доступа к запуску блока.")
-                return
-            data = await state.get_data()
-            block_index = data.get("quiz_index", 0)
-            if len(message.text.strip().split()) == 2:
-                # Позволяет запускать конкретный блок: /run_block 0
-                try:
-                    block_index = int(message.text.strip().split()[1])
-                except ValueError:
-                    pass
-            if block_index < 0 or block_index >= len(questions):
-                await message.answer("Нет такого блока.")
-                return
-
-            # Получить всех уникальных пользователей (chat_id, user_id)
-            self.cur.execute("SELECT DISTINCT chat_id, user_id FROM answers WHERE chat_id IS NOT NULL")
-            users = self.cur.fetchall()
-            if not users:
-                await message.answer("Нет зарегистрированных участников.")
-                return
-
-            count = 0
-            for chat_id, user_id in users:
-                questions_block = questions[block_index]["text"]
-                await state.update_data(block_questions=questions_block, block_step=0, answers=[])
-                await self.bot.send_message(chat_id, f"{questions_block[0]}")
-                await state.set_state(State.asking)
-                count += 1
-
-            await message.answer(f"❗‍INFO❗‍\nБлок #{block_index} запущен для {count} пользователей.")
+        # @self.router.message(Command("run_block"))
+        # async def start_block_quiz(message: Message, state: FSMContext):
+        #     if message.from_user.id != ADMIN_ID:
+        #         await message.answer("У вас нет доступа к запуску блока.")
+        #         return
+        #     data = await state.get_data()
+        #     block_index = data.get("quiz_index", 0)
+        #     if len(message.text.strip().split()) == 2:
+        #         try:
+        #             block_index = int(message.text.strip().split()[1])
+        #         except ValueError:
+        #             pass
+        #     if block_index < 0 or block_index >= len(questions):
+        #         await message.answer("Нет такого блока.")
+        #         return
+        #
+        #     self.cur.execute("SELECT DISTINCT chat_id, user_id FROM answers WHERE chat_id IS NOT NULL")
+        #     users = self.cur.fetchall()
+        #     if not users:
+        #         await message.answer("Нет зарегистрированных участников.")
+        #         return
+        #
+        #     count = 0
+        #     for chat_id, user_id in users:
+        #         questions_block = questions[block_index]["text"]
+        #         await self.bot.send_message(chat_id, f"{questions_block[0]}")
+        #         count += 1
+        #
+        #     await message.answer(f"❗‍INFO❗‍\nБлок #{block_index} запущен для {count} пользователей.")
 
         @self.router.message(Command("export"))
         async def export_data(message: Message, state: FSMContext):
@@ -340,19 +271,17 @@ class InteractiveBot:
             if message.from_user.id != ADMIN_ID:
                 await message.answer("У вас нет доступа к этой команде.")
                 return
-            # Получаем все file_id из базы, где ответы начинаются с photo_file_id:
             self.cur.execute("SELECT * FROM answers")
             rows = self.cur.fetchall()
             columns = [desc[0] for desc in self.cur.description]
             photo_file_ids = []
             for row in rows:
-                username = row[3] or "unknown"  # Если username нет — подставить 'unknown'
+                username = row[3] or "unknown"
                 for i, col in enumerate(columns):
                     if col.startswith("answer_") and row[i]:
                         if str(row[i]).startswith("photo_file_id:"):
                             photo_file_id = str(row[i]).split(":", 1)[1]
                             photo_file_ids.append((photo_file_id, username))
-            # Скачиваем все изображения
             saved = 0
             for file_id, username in photo_file_ids:
                 try:
@@ -362,7 +291,97 @@ class InteractiveBot:
                     await message.answer(f"Ошибка скачивания: {file_id} — {e}")
             await message.answer(f"Готово! Скачано {saved} изображений.")
 
-# -----------------------------------------------------------------------------------------------------------------
+        # 3. ОБРАБОТЧИКИ СОСТОЯНИЙ (callback_query должны быть перед message для того же состояния)
+        @self.router.callback_query(BotState.waiting_for_team)
+        async def setup_team(callback: types.CallbackQuery, state: FSMContext):
+            choice = callback.data.split("_")[1]
+            data = await state.get_data()
+            chat_id, user_id = data["chat_id"], data["user_id"]
+            self.cur.execute("UPDATE answers SET team=? WHERE chat_id=? AND user_id=?", (choice, chat_id, user_id))
+            self.conn.commit()
+            await state.update_data(team=choice)
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.answer(f"Вы выбрали вариант: {choice}")
+            await self.run_quiz(callback.message, state)
+
+        @self.router.message(BotState.waiting_for_fio)
+        async def registration(message: types.Message, state: FSMContext):
+            fio = message.text
+            user = message.from_user
+            chat_id = message.chat.id
+
+            self.cur.execute("SELECT id FROM answers WHERE user_id=? AND chat_id=?", (user.id, chat_id))
+            existing = self.cur.fetchone()
+
+            if existing:
+                self.cur.execute(
+                    "UPDATE answers SET username=?, full_name=?, fio=?, is_active=0, last_activity=CURRENT_TIMESTAMP WHERE user_id=? AND chat_id=?",
+                    (user.username or "", user.full_name or "", fio, user.id, chat_id)
+                )
+            else:
+                self.cur.execute(
+                    "INSERT INTO answers (user_id, chat_id, username, full_name, fio, team, current_block, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user.id, chat_id, user.username or "", user.full_name or "", fio, "", 0, 0)
+                )
+            self.conn.commit()
+
+            await state.update_data(fio=fio, chat_id=chat_id, user_id=user.id)
+            await message.answer(f"Отлично, {fio}")
+            await self.team(message, state)
+
+        @self.router.message(BotState.waiting_for_team)
+        async def error_on_team(message: Message):
+            await message.answer("Пожалуйста, выберите вариант с помощью кнопки!")
+
+        @self.router.callback_query(BotState.waiting_for_run_quiz)
+        async def registration_complete(callback: CallbackQuery, state: FSMContext):
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.answer("Погнали! 🚀")
+            await self.start_quiz(callback.message, state)
+            if not self.scheduler.running:
+                self.schedule_all_blocks()
+
+        @self.router.message(BotState.asking)
+        async def next_question(message: types.Message, state: FSMContext):
+            await self.process_answer(message, state)
+
+        # 4. УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК - ОБЯЗАТЕЛЬНО ПОСЛЕДНИЙ!
+        @self.router.message()
+        async def handle_message_without_state(message: types.Message, state: FSMContext):
+            current_state = await state.get_state()
+
+            if current_state == BotState.asking.state:
+                await self.process_answer(message, state)
+                return
+
+            self.cur.execute("SELECT is_active, current_block FROM answers WHERE chat_id=? AND user_id=?",
+                             (message.chat.id, message.from_user.id))
+            result = self.cur.fetchone()
+
+            if result and result[0] == 1:
+                user_key = f"{message.chat.id}_{message.from_user.id}"
+
+                if user_key in self.active_blocks:
+                    active_block_index = self.active_blocks[user_key]
+                    data = await state.get_data()
+
+                    if not data.get("block_questions") or data.get("quiz_index") != active_block_index:
+                        questions_block = questions[active_block_index]["text"]
+                        await state.set_data({
+                            "chat_id": message.chat.id,
+                            "user_id": message.from_user.id,
+                            "block_questions": questions_block,
+                            "block_step": 0,
+                            "answers": [],
+                            "quiz_index": active_block_index,
+                        })
+                        logging.info(
+                            f"Восстановлено состояние для пользователя {message.from_user.id}, блок {active_block_index}")
+
+                    await state.set_state(BotState.asking)
+                    await self.process_answer(message, state)
+                else:
+                    logging.warning(f"Пользователь {message.from_user.id} активен в БД, но нет активного блока")
 
     async def download_photo_by_file_id(self, photo_file_id, username):
         file = await self.bot.get_file(photo_file_id)
@@ -383,7 +402,7 @@ class InteractiveBot:
 
     async def team(self, message: Message, state: FSMContext):
         await message.answer(f"Теперь выберите цвет своего браслета, так мы сможем закрепить тебя в качестве участника за одной из команд:", reply_markup=self.keyboard)
-        await state.set_state(State.waiting_for_team)
+        await state.set_state(BotState.waiting_for_team)
 
     async def run_quiz(self, message: types.Message, state: FSMContext):
         keyboard_yes = InlineKeyboardMarkup(inline_keyboard=[
@@ -396,11 +415,22 @@ class InteractiveBot:
                              f"- за каждый правильный ответ команда получает баллы\n"
                              f"- в конце мероприятия будут призы для команд с наибольшим количеством очков, а также индивидуальные подарки\n\n"
                              f"Если готов(а) жми ДА", reply_markup=keyboard_yes)
-        await state.set_state(State.waiting_for_run_quiz)
+        await state.set_state(BotState.waiting_for_run_quiz)
 
     async def start_quiz(self, message: types.Message, state: FSMContext):
         index = 0
         block = questions[index]["text"]
+
+        user_key = f"{message.chat.id}_{message.from_user.id}"
+        self.active_blocks[user_key] = index
+
+        # Обновляем статус в базе данных
+        self.cur.execute(
+            "UPDATE answers SET current_block=?, is_active=1, last_activity=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?",
+            (index, message.chat.id, message.from_user.id)
+        )
+        self.conn.commit()
+
         await state.update_data(
             chat_id=message.chat.id,
             user_id=message.from_user.id,
@@ -410,13 +440,14 @@ class InteractiveBot:
             quiz_index=index
         )
         await message.answer(block[0])
-        await state.set_state(State.asking)
+        await state.set_state(BotState.asking)
 
     async def save_answers(self, message: types.Message, answers, state: FSMContext):
         data = await state.get_data()
         chat_id = message.chat.id
         user_id = message.from_user.id
         index = data.get("quiz_index", 0)
+
         start_answer_index = sum(len(q["text"]) for q in questions[:index])
         questions_count = len(questions[index]["text"])
         answers_padded = answers + [""] * (questions_count - len(answers))
@@ -427,49 +458,279 @@ class InteractiveBot:
             col_num = start_answer_index + i + 1
             set_clause_parts.append(f"answer_{col_num}=?")
             params.append(answers_padded[i])
-        set_clause = ', '.join(set_clause_parts)
-        params.extend([chat_id, user_id])
 
-        self.cur.execute(f"UPDATE answers SET {set_clause}, current_block=? WHERE chat_id=? AND user_id=?",(*answers_padded, index + 1, chat_id, user_id))
+        set_clause = ', '.join(set_clause_parts)
+        params.extend([index + 1, chat_id, user_id])
+
+        self.cur.execute(
+            f"UPDATE answers SET {set_clause}, current_block=?, last_activity=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?",
+            params
+        )
         self.conn.commit()
-        await state.update_data(quiz_index = index + 1)
 
     def schedule_all_blocks(self):
-        self.job = self.scheduler.add_job(self.timer_block_run, "interval", minutes=1)
+        # ИСПРАВЛЕНИЕ: Используем более частый интервал для проверки (каждые 30 секунд)
+        # и запускаем планировщик только если он еще не запущен
+        if not self.scheduler.running:
+            self.scheduler.start()
+            logging.info("Планировщик запущен")
+
+        # Добавляем задачу проверки каждые 30 секунд
+        self.job = self.scheduler.add_job(
+            self.timer_block_run,
+            "interval",
+            seconds=30,  # Проверяем каждые 30 секунд
+            id="timer_job",  # Добавляем ID для предотвращения дубликатов
+            replace_existing=True  # Заменяем существующую задачу если есть
+        )
+        logging.info("Задача планировщика добавлена")
 
     async def timer_block_run(self):
-        self.cur.execute("SELECT chat_id, user_id, current_block FROM answers")
-        for chat_id, user_id, current_block in self.cur.fetchall():
-            await self.try_start_next_block(user_id=user_id, chat_id=chat_id, current_block=current_block)
+        """Проверяет и запускает блоки по расписанию"""
+        try:
+            now = datetime.now()
+            logging.info(f"Планировщик проверяет блоки в {now.strftime('%H:%M:%S')}")
 
-    async def try_start_next_block(self, chat_id, user_id, current_block):
-        now = datetime.now()
-        state = FSMContext(self.dp.storage, (chat_id, user_id))
-        fsm_state = await state.get_state()
-        if fsm_state == State.asking.state:
+            # Получаем всех пользователей
+            self.cur.execute(
+                "SELECT chat_id, user_id, current_block, is_active FROM answers WHERE current_block IS NOT NULL"
+            )
+            users_data = self.cur.fetchall()
+
+            if not users_data:
+                logging.info("Нет зарегистрированных пользователей")
+                return
+
+            # Проверяем каждого пользователя
+            for chat_id, user_id, current_block, is_active in users_data:
+                # Пропускаем активных пользователей
+                if is_active == 1:
+                    logging.info(f"Пользователь {user_id} активен, пропускаем")
+                    continue
+
+                # Пропускаем пользователей, завершивших все блоки
+                if current_block >= len(questions):
+                    continue
+
+                # Проверяем, есть ли доступный следующий блок
+                next_block_index = current_block
+                if next_block_index < len(questions):
+                    block = questions[next_block_index]
+                    block_time = block.get("time")
+
+                    # Пропускаем блоки без времени (первый блок)
+                    if block_time is None:
+                        continue
+
+                    # Проверяем, пришло ли время для блока
+                    if block_time <= now:
+                        logging.info(f"Время для блока {next_block_index} пришло для пользователя {user_id}")
+                        await self.send_next_block(chat_id, user_id, next_block_index)
+                    else:
+                        time_diff = (block_time - now).total_seconds() / 60
+                        logging.info(
+                            f"До блока {next_block_index} для пользователя {user_id} осталось {time_diff:.1f} минут")
+
+        except Exception as e:
+            logging.error(f"Ошибка в timer_block_run: {e}", exc_info=True)
+
+    async def send_next_block(self, chat_id, user_id, block_index):
+        """Отправляет следующий блок вопросов пользователю"""
+        try:
+            user_key = f"{chat_id}_{user_id}"
+
+            # Проверяем, не активен ли уже пользователь
+            if user_key in self.active_blocks:
+                logging.info(f"Пользователь {user_id} уже активен в блоке {self.active_blocks[user_key]}")
+                return
+
+            block = questions[block_index]
+            questions_block = block["text"]
+
+            # Помечаем пользователя как активного с правильным индексом блока
+            self.active_blocks[user_key] = block_index
+
+            # Создаем новое состояние FSM для пользователя
+            state = FSMContext(self.dp.storage, key=("bot", str(chat_id), str(user_id)))
+
+            # Очищаем старое состояние
+            await state.clear()
+
+            # Устанавливаем новые данные состояния
+            await state.set_data({
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "block_questions": questions_block,
+                "block_step": 0,
+                "answers": [],
+                "quiz_index": block_index,
+            })
+            await state.set_state(BotState.asking)
+
+            # Обновляем базу данных
+            self.cur.execute(
+                "UPDATE answers SET is_active=1, last_activity=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?",
+                (chat_id, user_id)
+            )
+            self.conn.commit()
+
+            # Отправляем сообщения пользователю
+            await self.bot.send_message(chat_id, "🔔 Ура! Новый блок вопросов доступен!")
+            await self.bot.send_message(chat_id, questions_block[0])
+
+            logging.info(
+                f"Блок {block_index} успешно отправлен пользователю {user_id}, вопросов в блоке: {len(questions_block)}")
+
+        except Exception as e:
+            logging.error(f"Ошибка при отправке блока {block_index} пользователю {user_id}: {e}", exc_info=True)
+            # Убираем пользователя из активных в случае ошибки
+            user_key = f"{chat_id}_{user_id}"
+            if user_key in self.active_blocks:
+                del self.active_blocks[user_key]
+
+    async def try_start_immediate_next_block(self, message: types.Message, state: FSMContext, current_quiz_index: int):
+        """
+        Пытается немедленно запустить следующий блок, если он доступен по времени.
+        Возвращает True, если следующий блок был запущен, False - если нет.
+        """
+        try:
+            now = datetime.now()
+            chat_id = message.chat.id
+            user_id = message.from_user.id
+
+            # Ищем следующий доступный блок
+            for next_index in range(current_quiz_index + 1, len(questions)):
+                next_block = questions[next_index]
+                block_time = next_block.get("time")
+
+                # Пропускаем блоки без времени
+                if block_time is None:
+                    continue
+
+                if block_time <= now:
+                    # Следующий блок доступен, запускаем его немедленно
+                    questions_block = next_block["text"]
+                    user_key = f"{chat_id}_{user_id}"
+
+                    # Обновляем активные блоки с правильным индексом
+                    self.active_blocks[user_key] = next_index
+
+                    # Очищаем старое состояние и устанавливаем новое
+                    await state.clear()
+                    await state.set_data({
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "block_questions": questions_block,
+                        "block_step": 0,
+                        "answers": [],
+                        "quiz_index": next_index,
+                    })
+                    await state.set_state(BotState.asking)
+
+                    # Обновляем базу данных
+                    self.cur.execute(
+                        "UPDATE answers SET current_block=?, is_active=1, last_activity=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?",
+                        (next_index, chat_id, user_id)
+                    )
+                    self.conn.commit()
+
+                    # Отправляем сообщение о новом блоке и первый вопрос
+                    await message.answer("🔔 Следующий блок вопросов уже доступен!")
+                    await message.answer(questions_block[0])
+
+                    logging.info(f"Немедленно запущен блок {next_index} для пользователя {user_id}")
+                    return True
+                else:
+                    # Если следующий блок еще недоступен, прекращаем поиск
+                    break
+
+            return False
+
+        except Exception as e:
+            logging.error(f"Ошибка в try_start_immediate_next_block для пользователя {user_id}: {e}")
+            return False
+
+    async def process_answer(self, message: types.Message, state: FSMContext):
+        data = await state.get_data()
+        questions_block = data.get("block_questions", [])
+        step = data.get("block_step", 0)
+        answers = data.get("answers", [])
+        quiz_index = data.get("quiz_index", 0)
+
+        # Проверяем, что у нас есть вопросы и корректный шаг
+        if not questions_block or step >= len(questions_block):
+            logging.error(f"Ошибка: questions_block пустой или step вне границ. "
+                          f"questions_block: {questions_block}, step: {step}")
+            await message.answer("Произошла ошибка. Пожалуйста, попробуйте еще раз или обратитесь к администратору.")
             return
-        for block_index, block in enumerate(questions):
-            if (block["time"] <= now) and ((current_block or 0) <= block_index):
-                questions_block = block["text"]
-                await state.set_data({
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "block_questions": questions_block,
-                    "block_step": 0,
-                    "answers": [],
-                    "quiz_index": block_index,
-                })
-                await state.set_state(State.asking)
-                await self.bot.send_message(chat_id, "Ура! Новый блок вопросов")
-                await self.bot.send_message(chat_id, questions_block[0])
-                self.cur.execute("UPDATE answers SET current_block=? WHERE chat_id=? AND user_id=?",
-                                 (block_index, chat_id, user_id))
+
+        current_question = questions_block[step]
+
+        photo_question_text = (
+            "Сделайте и отправьте креативную фотографию с коллегой с которым чаще всего взаимодействуешь по работе (приветствуется использование ИИ)."
+        )
+        if current_question.strip() == photo_question_text.strip():
+            if not message.photo:
+                await message.answer("Пожалуйста, отправьте фото 📷")
+                return
+            answers.append(f"photo_file_id:{message.photo[-1].file_id}")
+        else:
+            answers.append(message.text)
+
+        step += 1
+        if step < len(questions_block):
+            await state.update_data(block_step=step, answers=answers)
+            await message.answer(questions_block[step])
+        else:
+            await state.update_data(answers=answers)
+            await self.save_answers(message, answers, state)
+
+            # Проверяем, есть ли следующий доступный блок
+            next_block_started = await self.try_start_immediate_next_block(message, state, quiz_index)
+
+            if not next_block_started:
+                # Проверяем, все ли блоки завершены
+                if quiz_index + 1 >= len(questions):
+                    # Все блоки завершены - показываем благодарность
+                    await message.answer("🎉 Поздравляем! Вы успешно прошли все блоки корпоративной игры!\n\n"
+                                         "Спасибо за активное участие в мероприятии «Традиции и трансформация». "
+                                         "Ваши ответы записаны и будут учтены при подведении итогов.\n\n"
+                                         "Ожидайте объявления результатов и награждения! 🏆")
+                else:
+                    # Если следующий блок недоступен, показываем сообщение ожидания
+                    next_time = questions[quiz_index + 1]["time"]
+                    time_str = next_time.strftime("%H:%M") if next_time else "неизвестное время"
+                    await message.answer(f"Спасибо за ваши ответы! Они записаны.\n"
+                                         f"Следующий блок вопросов будет доступен в {time_str}. "
+                                         f"Я отправлю вам уведомление! ⏰")
+
+                # Помечаем пользователя как неактивного после завершения блока
+                user_key = f"{message.chat.id}_{message.from_user.id}"
+                if user_key in self.active_blocks:
+                    del self.active_blocks[user_key]
+
+                # Обновляем статус в базе данных
+                self.cur.execute(
+                    "UPDATE answers SET is_active=0, last_activity=CURRENT_TIMESTAMP WHERE chat_id=? AND user_id=?",
+                    (message.chat.id, message.from_user.id)
+                )
                 self.conn.commit()
-                break
+
+                await state.clear()
+
+    def get_all_answers(self):
+        self.cur.execute("SELECT * FROM answers")
+        return self.cur.fetchall()
 
     async def main(self):
-        self.scheduler.start()
-        await self.dp.start_polling(self.bot)
+        try:
+            logging.info("Бот запускается...")
+            await self.dp.start_polling(self.bot)
+        finally:
+            self.conn.close()
+            if self.scheduler.running:
+                self.scheduler.shutdown()
+            logging.info("Бот остановлен")
 
 class AdminExport:
     def __init__(self, bot: Bot, cur: sqlite3.Cursor, admin_id: int,
