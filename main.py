@@ -12,7 +12,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime, timedelta, date
-
+import re
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -241,6 +241,7 @@ class InteractiveBot:
                 "/run_block — запустить блок опроса вручную\n"
                 "/remind — тестовое напоминание по времени\n"
                 "/export — выгрузка в таблицу\n"
+                "/download_all_photos — выгрузка в таблицу\n"
                 # Добавьте свои команды ниже по мере необходимости:
                 # "/start_auto_quiz — авто-рассылка вопросов по времени\n"
                 # "/delete_all — удалить все ответы из базы\n"
@@ -333,8 +334,49 @@ class InteractiveBot:
         @self.router.message(Command("export"))
         async def export_data(message: Message, state: FSMContext):
             await self.admin_export.export_to_sheet(message)
-    # -----------------------------------------------------------------------------------------------------------------
 
+        @self.router.message(Command("download_all_photos"))
+        async def download_all_photos_cmd(message: types.Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+            # Получаем все file_id из базы, где ответы начинаются с photo_file_id:
+            self.cur.execute("SELECT * FROM answers")
+            rows = self.cur.fetchall()
+            columns = [desc[0] for desc in self.cur.description]
+            photo_file_ids = []
+            for row in rows:
+                username = row[3] or "unknown"  # Если username нет — подставить 'unknown'
+                for i, col in enumerate(columns):
+                    if col.startswith("answer_") and row[i]:
+                        if str(row[i]).startswith("photo_file_id:"):
+                            photo_file_id = str(row[i]).split(":", 1)[1]
+                            photo_file_ids.append((photo_file_id, username))
+            # Скачиваем все изображения
+            saved = 0
+            for file_id, username in photo_file_ids:
+                try:
+                    await self.download_photo_by_file_id(file_id, username)
+                    saved += 1
+                except Exception as e:
+                    await message.answer(f"Ошибка скачивания: {file_id} — {e}")
+            await message.answer(f"Готово! Скачано {saved} изображений.")
+
+# -----------------------------------------------------------------------------------------------------------------
+
+    async def download_photo_by_file_id(self, photo_file_id, username):
+        file = await self.bot.get_file(photo_file_id)
+        file_path = file.file_path
+        # Очищаем username от недопустимых для файлов символов
+        safe_username = re.sub(r'[^\w.-]', '_', str(username))
+        destination = f"downloaded_images/{safe_username}.jpg"
+        os.makedirs("downloaded_images", exist_ok=True)
+        with open(destination, "wb") as f:
+            file_bytes = await self.bot.download_file(file_path)
+            f.write(file_bytes.getvalue())
+        return destination
+
+# -----------------------------------------------------------------------------------------------------------------
     async def name(self, message: Message):
         await message.answer("Дорогой коллега, приветствую тебя в корпоративной игре, которая проводится в рамках мероприятия «Традиции и трансформация». 🎉")
         await message.answer("Пожалуйста, введите своё ФИ для регистрации участия:")
