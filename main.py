@@ -16,6 +16,8 @@ import re
 import gspread
 from google.oauth2.service_account import Credentials
 
+from poem import TeamPoemManager, TeamPoemState
+
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
@@ -38,20 +40,29 @@ questions = [
             "Что ты запомнил из сегодняшнего выступления Андреева Дмитрия? Напишите ключевую мысль.",
             "По твоему мнению, какое самое важное достижение у компании за этот год и почему?"
         ],
-        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
+        # Для тестирования: через 2 минуты после запуска
+        "time": datetime.now() + timedelta(minutes=2)
+        # Для продакшена:
+        #"time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
     },
     {
         "text": [
             "Сделайте и отправьте креативную фотографию с коллегой с которым чаще всего взаимодействуешь по работе (приветствуется использование ИИ)."
         ],
-        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
+        # Для тестирования: через 4 минуты после запуска
+        "time": datetime.now() + timedelta(minutes=4)
+        # Для продакшена:
+        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=12, minutes=30)
     },
     {
         "text": [
             "Какой продукт нашей компании тебе нравится больше всего и почему?\nОпиши, что именно в этом продукте привлекает тебя — будь то функциональность, дизайн, польза для клиентов или что-то ещё. Постарайся раскрыть свои личные впечатления и причины выбора.",
             "С помощью ИИ сгенерируй и направь сюда ответ с нестандартными способами использования продукта, о котором ты писал(а) выше, выходящими за рамки его традиционного применения."
         ],
-        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
+        # Для тестирования: через 6 минут после запуска
+        "time": datetime.now() + timedelta(minutes=6)
+        # Для продакшена:
+        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=14, minutes=30)
     },
     {
         "text": [
@@ -59,7 +70,10 @@ questions = [
             "Как бы вы переосмыслили одно из ключевых правил Agile, чтобы оно отражало не только гибкость и скорость, но и вдохновение и творческий подход в работе команды?",
             "Расшифруйте ребус из эмодзи и напишите, какое Agile-понятие или практика здесь изображены\n 🐢📅🛠",
         ],
-        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
+        # Для тестирования: через 8 минут после запуска
+        "time": datetime.now() + timedelta(minutes=8)
+        # Для продакшена:
+        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=15, minutes=00)
     },
     {
         "text": [
@@ -71,7 +85,10 @@ questions = [
             "— Продолжите стихотворение, добавив ещё одну рифмованную строчку.\n\n"
             "3. Задание поочерёдно передаётся всем участникам команды, каждый добавляет свою строчку, развивая общее стихотворение."
         ],
-        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
+        # Для тестирования: через 10 минут после запуска
+        "time": datetime.now() + timedelta(minutes=10)
+        # Для продакшена:
+        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=00)
     },
 ]
 
@@ -89,6 +106,7 @@ class InteractiveBot:
         self.router = Router()
         self.dp.include_router(self.router)
         self._init_db()
+        self.poem_manager = TeamPoemManager(self.bot, self.conn)
 
         self.admin_export = AdminExport(
             bot=self.bot,
@@ -344,6 +362,13 @@ class InteractiveBot:
         @self.router.message(BotState.asking)
         async def next_question(message: types.Message, state: FSMContext):
             await self.process_answer(message, state)
+
+        @self.router.message(TeamPoemState.waiting_for_poem_line)
+        async def handle_poem_line(message: types.Message, state: FSMContext):
+            success = await self.poem_manager.process_poem_line(message, state)
+            if success:
+                # Очищаем состояние после успешной обработки
+                await state.clear()
 
         # 4. УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК - ОБЯЗАТЕЛЬНО ПОСЛЕДНИЙ!
         @self.router.message()
@@ -687,6 +712,19 @@ class InteractiveBot:
 
             # Проверяем, есть ли следующий доступный блок
             next_block_started = await self.try_start_immediate_next_block(message, state, quiz_index)
+
+            # Если это последний блок (стихотворение), запускаем особую логику
+            if quiz_index == 4:  # Индекс последнего блока с стихотворением
+                # Проверяем, не нужно ли запустить командное стихотворение
+                poem_started = await self.poem_manager.check_and_start_poem_for_user(
+                    message.from_user.id,
+                    message.chat.id
+                )
+
+                if poem_started:
+                    # Устанавливаем специальное состояние для ожидания строки
+                    await state.set_state(TeamPoemState.waiting_for_poem_line)
+                    return
 
             if not next_block_started:
                 # Проверяем, все ли блоки завершены
