@@ -32,7 +32,7 @@ questions = [
             "Назовите три ключевые ценности корпоративной культуры, важные для роста нашей компании",
             "Сформулируйте 2-3 ключевых правила для поведения сотрудников на встречах и совещаниях"
         ],
-        "time": datetime.now()
+        "time": None
     },
     {
         "text": [
@@ -784,9 +784,13 @@ class AdminExport:
         creds = Credentials.from_service_account_file(self.creds_json_path, scopes=scopes)
         self.gc = gspread.authorize(creds)
 
-    def _get_all_answers_data(self):
+    def _get_all_answers_data(self, table_name: str):
+        if not table_name.isidentifier():
+            raise ValueError("Некорректное имя таблицы!")
         # Берем все строки из таблицы answers
-        self.cur.execute("SELECT * FROM answers")
+        query = f"SELECT * FROM {table_name}"
+        self.cur.execute(query)
+
         columns = [desc[0] for desc in self.cur.description]
         rows = self.cur.fetchall()
         # Формируем список списков, первая строка - заголовки
@@ -804,9 +808,16 @@ class AdminExport:
 
         try:
             sheet = self.gc.open_by_key(self.spreadsheet_id).sheet1  # Можно выбрать нужный лист
-            data = self._get_all_answers_data()
+            data = self._get_all_answers_data("answers")
             sheet.clear()  # Чистим лист перед загрузкой
             sheet.update('A1', data)  # Загружаем данные начиная с ячейки A1
+
+            spreadsheet = self.gc.open_by_key(self.spreadsheet_id)
+            sheet = spreadsheet.get_worksheet(1)
+            data = self._get_all_answers_data("poem_contributions")
+            sheet.clear()  # Чистим лист перед загрузкой
+            sheet.update('A1', data)  # Загружаем данные начиная с ячейки A1
+
             await message.answer("Данные успешно экспортированы в Google Таблицу.")
         except Exception as e:
             await message.answer(f"Произошла ошибка при экспорте: {e}")
