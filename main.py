@@ -199,12 +199,65 @@ class InteractiveBot:
                 "/results — вывести все результаты пользователей\n"
                 "/quiz_list — список блоков вопросов\n"
                 "/block [номер_блока] — посмотреть вопросы из выбранного блока\n"
+                "/bd_users — посмотреть данные из БД\n"
+                "/bd_clear — удалить данные из БД\n"
                 "/export — выгрузка в таблицу\n"
                 "/download_all_photos — выгрузка в таблицу\n"
                 "/finish_game — завершить игру досрочно\n"
                 "/help_admin — список админ-команд\n"
             )
             await message.answer(text, parse_mode="HTML")
+
+        @self.router.message(Command("bd_users"))
+        async def list_users(message: Message):
+            # Доступ только администратору
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+
+            # Достаем нужные 3 поля из БД
+            self.cur.execute("""
+                             SELECT username, full_name, fio, is_active
+                             FROM answers
+                             """)
+            rows = self.cur.fetchall()
+
+            if not rows:
+                await message.answer("В базе нет зарегистрированных пользователей.")
+                return
+
+            # Формируем красивый список
+            text_lines = []
+            for idx, (username, full_name, fio, is_active) in enumerate(rows, start=1):
+                uname = f"@{username}" if username else "—"
+                active_status = "✅" if is_active == 1 else "❌"
+                text_lines.append(f"{idx}. {uname} | {full_name} | {fio} | Активен: {active_status}")
+
+            # Склеиваем в одно сообщение (проверим лимит в 4096 символов Telegram)
+            text = "\n".join(text_lines)
+            for chunk in [text[i:i + 4000] for i in range(0, len(text), 4000)]:
+                await message.answer(chunk)
+
+        @self.router.message(Command("bd_clear"))
+        async def clear_table_cmd(message: Message):
+            # Проверка прав администратора
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+
+            # Очищаем таблицу
+            try:
+                self.cur.execute("DELETE FROM answers")
+                self.cur.execute(f"DELETE FROM sqlite_sequence WHERE name='answers'")  # сброс автоинкремента
+                self.conn.commit()
+                await message.answer("✅ Таблица answers успешно очищена!")
+
+                self.cur.execute("DELETE FROM poem_contributions")
+                self.cur.execute(f"DELETE FROM sqlite_sequence WHERE name='poem_contributions'")  # сброс автоинкремента
+                self.conn.commit()
+                await message.answer("✅ Таблица poem_contributions успешно очищена!")
+            except Exception as e:
+                await message.answer(f"❌ Ошибка при очистке таблицы: {e}")
 
         @self.router.message(Command("results"))
         async def view_results(message: types.Message):
