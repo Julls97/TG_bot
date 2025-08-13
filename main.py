@@ -203,6 +203,8 @@ class InteractiveBot:
                 "/bd_clear — удалить данные из БД\n"
                 "/export — выгрузка в таблицу\n"
                 "/download_all_photos — выгрузка в таблицу\n"
+                "/get_all_photos — отправить все фото в чат\n"
+                "/get_photo — отправить фото в чат по id \n"
                 "/finish_game — завершить игру досрочно\n"
                 "/help_admin — список админ-команд\n"
             )
@@ -345,6 +347,78 @@ class InteractiveBot:
                 except Exception as e:
                     await message.answer(f"Ошибка скачивания: {file_id} — {e}")
             await message.answer(f"Готово! Скачано {saved} изображений.")
+
+        @self.router.message(Command("get_photo"))
+        async def get_photo_by_id_cmd(message: types.Message):
+            """Команда для загрузки фото по file_id в чат админа"""
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+
+            # Получаем file_id из команды: /get_photo AgACAgIAAxkBAAIMdWiZ...
+            args = message.text.split(maxsplit=1)
+            if len(args) < 2:
+                await message.answer("Использование: /get_photo <file_id>")
+                return
+
+            file_id = args[1].strip()
+
+            try:
+                # Получаем файл через Telegram API
+                file = await self.bot.get_file(file_id)
+
+                # Отправляем фото в чат
+                await self.bot.send_photo(
+                    chat_id=message.chat.id,
+                    photo=file_id,
+                    caption=f"Фото по ID: {file_id}"
+                )
+
+            except Exception as e:
+                await message.answer(f"Ошибка при получении фото: {e}")
+
+        @self.router.message(Command("get_all_photos"))
+        async def get_all_photos_cmd(message: types.Message):
+            """Команда для отправки всех фото из БД в чат админа"""
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+
+            # Поиск всех фото в БД
+            self.cur.execute("SELECT * FROM answers")
+            rows = self.cur.fetchall()
+            columns = [desc[0] for desc in self.cur.description]
+
+            photo_data = []
+            for row in rows:
+                username = row[3] or "unknown"
+                user_id = row[1]
+                for i, col in enumerate(columns):
+                    if col.startswith("answer_") and row[i]:
+                        if str(row[i]).startswith("photo_file_id:"):
+                            photo_file_id = str(row[i]).split(":", 1)[1]
+                            photo_data.append((photo_file_id, username, user_id))
+
+            if not photo_data:
+                await message.answer("В базе данных нет фотографий.")
+                return
+
+            await message.answer(f"Найдено {len(photo_data)} фотографий. Отправляю...")
+
+            sent = 0
+            for file_id, username, user_id in photo_data:
+                try:
+                    await self.bot.send_photo(
+                        chat_id=message.chat.id,
+                        photo=file_id,
+                        caption=f"👤 {username} (ID: {user_id})\n📷 File ID: {file_id}"
+                    )
+                    sent += 1
+                except Exception as e:
+                    await message.answer(f"Ошибка отправки фото от {username}: {e}")
+
+            await message.answer(f"✅ Отправлено {sent} из {len(photo_data)} фотографий.")
+
 
         # 3. ОБРАБОТЧИКИ СОСТОЯНИЙ (callback_query должны быть перед message для того же состояния)
         @self.router.callback_query(BotState.waiting_for_team)
@@ -822,7 +896,7 @@ class InteractiveBot:
             next_block_started = await self.try_start_immediate_next_block(message, state, quiz_index)
 
             # Если это последний блок (стихотворение), запускаем особую логику
-            if quiz_index == 4:  # Индекс последнего блока с стихотворением
+            if quiz_index == 4:  # Индекс последнего блока со стихотворением
                 # Проверяем, не нужно ли запустить командное стихотворение
                 poem_started = await self.poem_manager.check_and_start_poem_for_user(
                     message.from_user.id,
