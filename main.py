@@ -50,7 +50,7 @@ questions = [
             "Сделайте и отправьте креативную фотографию с коллегой с которым чаще всего взаимодействуешь по работе (приветствуется использование ИИ)."
         ],
         # Для тестирования: через 4 минуты после запуска
-        "time": datetime.now() + timedelta(minutes=4)
+        "time": datetime.now() + timedelta(minutes=3)
         # Для продакшена:
         # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=12, minutes=30)
     },
@@ -60,7 +60,7 @@ questions = [
             "С помощью ИИ сгенерируй и направь сюда ответ с нестандартными способами использования продукта, о котором ты писал(а) выше, выходящими за рамки его традиционного применения."
         ],
         # Для тестирования: через 6 минут после запуска
-        "time": datetime.now() + timedelta(minutes=6)
+        "time": datetime.now() + timedelta(minutes=4)
         # Для продакшена:
         # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=14, minutes=30)
     },
@@ -71,7 +71,7 @@ questions = [
             "Расшифруйте ребус из эмодзи и напишите, какое Agile-понятие или практика здесь изображены\n 🐢📅🛠",
         ],
         # Для тестирования: через 8 минут после запуска
-        "time": datetime.now() + timedelta(minutes=8)
+        "time": datetime.now() + timedelta(minutes=5)
         # Для продакшена:
         # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=15, minutes=00)
     },
@@ -86,7 +86,7 @@ questions = [
             "3. Задание поочерёдно передаётся всем участникам команды, каждый добавляет свою строчку, развивая общее стихотворение."
         ],
         # Для тестирования: через 10 минут после запуска
-        "time": datetime.now() + timedelta(minutes=10)
+        "time": datetime.now() + timedelta(minutes=6)
         # Для продакшена:
         # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=00)
     },
@@ -217,7 +217,12 @@ class InteractiveBot:
             for idx, row in enumerate(all_results, 1):
                 user_info = f"{row[3]} (@{row[2]})"
                 num_questions = sum(len(block["text"]) for block in questions)
-                answers = [f"{i + 1}: {row[4 + i]}" for i in range(num_questions)]
+                # Формируем список ответов (начинаем с индекса 4, так как первые 4 колонки - это метаданные)
+                answers = []
+                for i in range(num_questions):
+                    answer = row[10 + i] if (10 + i) < len(row) and row[10 + i] is not None else "Нет ответа"
+                    answers.append(f"{i + 1}: {answer}")
+
                 text += f"{idx}. {user_info}\n" + "\n".join(answers) + "\n\n"
             for chunk in [text[i:i + 4000] for i in range(0, len(text), 4000)]:
                 await message.answer(chunk)
