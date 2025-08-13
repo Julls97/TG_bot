@@ -106,7 +106,9 @@ class InteractiveBot:
         self.router = Router()
         self.dp.include_router(self.router)
         self._init_db()
-        self.poem_manager = TeamPoemManager(self.bot, self.conn)
+        self.poem_manager = TeamPoemManager(self.bot, self.conn, questions)
+
+        self.bot_active = True
 
         self.admin_export = AdminExport(
             bot=self.bot,
@@ -197,9 +199,9 @@ class InteractiveBot:
                 "/results — вывести все результаты пользователей\n"
                 "/quiz_list — список блоков вопросов\n"
                 "/block [номер_блока] — посмотреть вопросы из выбранного блока\n"
-                # "/run_block — запустить блок опроса вручную\n"
                 "/export — выгрузка в таблицу\n"
                 "/download_all_photos — выгрузка в таблицу\n"
+                "/finish_game — завершить игру досрочно\n"
                 "/help_admin — список админ-команд\n"
             )
             await message.answer(text, parse_mode="HTML")
@@ -255,35 +257,12 @@ class InteractiveBot:
             else:
                 await message.answer("Нет такого блока.")
 
-        # @self.router.message(Command("run_block"))
-        # async def start_block_quiz(message: Message, state: FSMContext):
-        #     if message.from_user.id != ADMIN_ID:
-        #         await message.answer("У вас нет доступа к запуску блока.")
-        #         return
-        #     data = await state.get_data()
-        #     block_index = data.get("quiz_index", 0)
-        #     if len(message.text.strip().split()) == 2:
-        #         try:
-        #             block_index = int(message.text.strip().split()[1])
-        #         except ValueError:
-        #             pass
-        #     if block_index < 0 or block_index >= len(questions):
-        #         await message.answer("Нет такого блока.")
-        #         return
-        #
-        #     self.cur.execute("SELECT DISTINCT chat_id, user_id FROM answers WHERE chat_id IS NOT NULL")
-        #     users = self.cur.fetchall()
-        #     if not users:
-        #         await message.answer("Нет зарегистрированных участников.")
-        #         return
-        #
-        #     count = 0
-        #     for chat_id, user_id in users:
-        #         questions_block = questions[block_index]["text"]
-        #         await self.bot.send_message(chat_id, f"{questions_block[0]}")
-        #         count += 1
-        #
-        #     await message.answer(f"❗‍INFO❗‍\nБлок #{block_index} запущен для {count} пользователей.")
+        @self.router.message(Command("finish_game"))
+        async def finish_game_cmd(message: Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+            await self.finish_bot_work(message)
 
         @self.router.message(Command("export"))
         async def export_data(message: Message, state: FSMContext):
@@ -498,6 +477,52 @@ class InteractiveBot:
         )
         self.conn.commit()
 
+    async def finish_bot_work(self, message: Message = None):
+        """Завершает работу бота и отправляет финальные сообщения всем участникам"""
+        try:
+            self.bot_active = False
+
+            # Получаем всех зарегистрированных участников
+            self.cur.execute("SELECT DISTINCT chat_id, user_id, fio FROM answers WHERE chat_id IS NOT NULL")
+            users = self.cur.fetchall()
+
+            final_message = (
+                "Дорогой коллега, благодарим тебя за активное участие в нашей корпоративной игре! 🎊 🎉\n\n"
+                "На этом все вопросы и задания завершаются.🚀\n\n"
+                "Ожидай результаты и награждение 🏆 — они будут объявлены совсем скоро."
+            )
+
+            # Отправляем финальное сообщение всем участникам
+            sent_count = 0
+            for chat_id, user_id, fio in users:
+                try:
+                    await self.bot.send_message(chat_id, final_message)
+                    sent_count += 1
+                except Exception as e:
+                    logging.error(f"Ошибка отправки финального сообщения пользователю {fio} ({user_id}): {e}")
+
+            # Останавливаем планировщик
+            if self.scheduler.running:
+                self.scheduler.shutdown()
+                logging.info("Планировщик остановлен")
+
+            # Очищаем активные блоки
+            self.active_blocks.clear()
+
+            # Обновляем статус всех пользователей в БД
+            self.cur.execute("UPDATE answers SET is_active=0 WHERE is_active=1")
+            self.conn.commit()
+
+            if message:
+                await message.answer(f"✅ Игра завершена!")
+
+            logging.info(f"Игра завершена. Финальное сообщение отправлено {sent_count} участникам.")
+
+        except Exception as e:
+            logging.error(f"Ошибка при завершении игры: {e}")
+            if message:
+                await message.answer("❌ Произошла ошибка при завершении игры.")
+
     def schedule_all_blocks(self):
         # ИСПРАВЛЕНИЕ: Используем более частый интервал для проверки (каждые 30 секунд)
         # и запускаем планировщик только если он еще не запущен
@@ -514,6 +539,23 @@ class InteractiveBot:
             replace_existing=True  # Заменяем существующую задачу если есть
         )
         logging.info("Задача планировщика добавлена")
+
+        # Добавляем задачу для автоматического завершения в 16:30
+        finish_time = datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=30)
+
+        self.scheduler.add_job(
+            self.auto_finish_game,
+            "date",
+            run_date=finish_time,
+            id="auto_finish_job",
+            replace_existing=True
+        )
+        logging.info(f"Запланировано автоматическое завершение игры на {finish_time.strftime('%H:%M')}")
+
+    async def auto_finish_game(self):
+        """Автоматическое завершение игры в запланированное время"""
+        logging.info("Автоматическое завершение игры запущено")
+        await self.finish_bot_work()
 
     async def timer_block_run(self):
         """Проверяет и запускает блоки по расписанию"""
@@ -630,6 +672,10 @@ class InteractiveBot:
 
             # Ищем следующий доступный блок
             for next_index in range(current_quiz_index + 1, len(questions)):
+                if not self.bot_active:
+                    await message.answer("Бот завершил свою работу.")
+                    break
+
                 next_block = questions[next_index]
                 block_time = next_block.get("time")
 
@@ -686,6 +732,10 @@ class InteractiveBot:
         step = data.get("block_step", 0)
         answers = data.get("answers", [])
         quiz_index = data.get("quiz_index", 0)
+
+        if not self.bot_active:
+            await message.answer("Бот завершил свою работу.")
+            return
 
         # Проверяем, что у нас есть вопросы и корректный шаг
         if not questions_block or step >= len(questions_block):
