@@ -106,7 +106,7 @@ class InteractiveBot:
         self.router = Router()
         self.dp.include_router(self.router)
         self._init_db()
-        self.poem_manager = TeamPoemManager(self.bot, self.conn, questions)
+        self.poem_manager = TeamPoemManager(self.bot, self.conn)
 
         self.bot_active = True
 
