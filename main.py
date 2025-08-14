@@ -40,18 +40,18 @@ questions = [
             "По твоему мнению, какое самое важное достижение у компании за этот год и почему?"
         ],
         # Для тестирования: через 2 минуты после запуска
-        "time": datetime.now() + timedelta(minutes=2)
+        # "time": datetime.now() + timedelta(minutes=1)
         # Для продакшена:
-        #"time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=9, minutes=55)
     },
     {
         "text": [
             "Сделай и отправь креативную фотографию с коллегой, с которым чаще всего взаимодействуешь по работе (приветствуется использование ИИ)."
         ],
         # Для тестирования: через 4 минуты после запуска
-        "time": datetime.now() + timedelta(minutes=3)
+        # "time": datetime.now() + timedelta(minutes=2)
         # Для продакшена:
-        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=12, minutes=30)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=12, minutes=30)
     },
     {
         "text": [
@@ -59,9 +59,9 @@ questions = [
             "С помощью ИИ сгенерируй и направь сюда ответ с нестандартными способами использования продукта, о котором ты писал(а) выше, выходящими за рамки его традиционного применения."
         ],
         # Для тестирования: через 6 минут после запуска
-        "time": datetime.now() + timedelta(minutes=4)
+        # "time": datetime.now() + timedelta(minutes=3)
         # Для продакшена:
-        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=14, minutes=30)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=14, minutes=30)
     },
     {
         "text": [
@@ -70,9 +70,9 @@ questions = [
             "Расшифруй ребус из эмодзи и напиши, какое Agile-понятие или практика здесь изображены\n 🐢📅🛠",
         ],
         # Для тестирования: через 8 минут после запуска
-        "time": datetime.now() + timedelta(minutes=5)
+        # "time": datetime.now() + timedelta(minutes=4)
         # Для продакшена:
-        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=15, minutes=00)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=15, minutes=30)
     },
     {
         "text": [
@@ -85,9 +85,9 @@ questions = [
             "3. Задание поочерёдно передаётся всем участникам команды, каждый добавляет свою строчку, развивая общее стихотворение."
         ],
         # Для тестирования: через 10 минут после запуска
-        "time": datetime.now() + timedelta(minutes=6)
+        # "time": datetime.now() + timedelta(minutes=5)
         # Для продакшена:
-        # "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=00)
+        "time": datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=16, minutes=00)
     },
 ]
 
@@ -245,6 +245,7 @@ class InteractiveBot:
                 "/get_all_photos — отправить все фото в чат\n"
                 "/get_photo — отправить фото в чат по id \n"
                 "/finish_game — завершить игру досрочно\n"
+                "/start_poem [команда] — сразу перейти к стихотворению для команды\n"
                 "/send_schedule — команда для отправки расписания\n"
                 "/help_admin — список админ-команд\n"
             )
@@ -358,6 +359,72 @@ class InteractiveBot:
                 await message.answer("У вас нет доступа к этой команде.")
                 return
             await self.finish_bot_work(message)
+
+        @self.router.message(Command("start_poem"))
+        async def start_poem_cmd(message: Message):
+            """Команда для немедленного запуска стихотворения для команды"""
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("У вас нет доступа к этой команде.")
+                return
+            
+            # Получаем название команды из команды: /start_poem Красный
+            args = message.text.split(maxsplit=1)
+            if len(args) < 2:
+                await message.answer("Использование: /start_poem <название_команды>\n\nДоступные команды:\n• Красный\n• Желтый\n• Зелёный\n• Синий")
+                return
+            
+            team_name = args[1].strip()
+            
+            # Проверяем, что команда существует
+            if team_name not in ["Красный", "Желтый", "Зелёный", "Синий"]:
+                await message.answer("❌ Неверное название команды!\n\nДоступные команды:\n• Красный\n• Желтый\n• Зелёный\n• Синий")
+                return
+            
+            try:
+                # Проверяем, есть ли участники в команде и их текущий прогресс
+                self.cur.execute("""
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN current_block >= 5 THEN 1 ELSE 0 END) as ready_for_poem,
+                           SUM(CASE WHEN current_block < 5 THEN 1 ELSE 0 END) as not_ready
+                    FROM answers
+                    WHERE team = ?
+                """, (team_name,))
+                
+                result = self.cur.fetchone()
+                if not result or result[0] == 0:
+                    await message.answer(f"❌ В команде {team_name} нет участников!")
+                    return
+                
+                total_members, ready_for_poem, not_ready = result
+                await message.answer(
+                    f"🎭 **Анализ команды {team_name}:**\n\n"
+                    f"👥 Всего участников: {total_members}\n"
+                    f"✅ Готовы к стихотворению: {ready_for_poem}\n"
+                    f"⏳ Не готовы: {not_ready}\n\n"
+                    f"Запускаю стихотворение..."
+                )
+                
+                # Принудительно устанавливаем current_block = 5 для всех участников команды
+                self.cur.execute("""
+                    UPDATE answers 
+                    SET current_block = 5 
+                    WHERE team = ?
+                """, (team_name,))
+                self.conn.commit()
+                
+                await message.answer(f"✅ Все участники команды {team_name} переведены в блок стихотворения")
+                
+                # Принудительно запускаем стихотворение для команды
+                success = await self.poem_manager.start_team_poem_block(team_name)
+                
+                if success:
+                    await message.answer(f"✅ Стихотворение для команды {team_name} успешно запущено!\n\nПервый участник получил запрос на написание строки.")
+                else:
+                    await message.answer(f"❌ Ошибка при запуске стихотворения для команды {team_name}.\nВозможно, процесс уже запущен или произошла ошибка.")
+                    
+            except Exception as e:
+                logging.error(f"Ошибка при запуске стихотворения для команды {team_name}: {e}", exc_info=True)
+                await message.answer(f"❌ Произошла ошибка при запуске стихотворения: {e}")
 
         @self.router.message(Command("export"))
         async def export_data(message: Message, state: FSMContext):
@@ -558,20 +625,131 @@ class InteractiveBot:
 
         @self.router.message(TeamPoemState.waiting_for_poem_line)
         async def handle_poem_line(message: types.Message, state: FSMContext):
-            success = await self.poem_manager.process_poem_line(message, state)
-            if success:
-                # Очищаем состояние после успешной обработки
+            logging.info(
+                f"🎭 [POEM] Получено сообщение в состоянии waiting_for_poem_line от user_id={message.from_user.id}: {message.text}")
+
+            # Проверяем, что пользователь действительно участвует в стихотворении
+            if not self.poem_manager.is_user_in_poem_process(message.from_user.id):
+                logging.warning(f"🎭 [POEM] Пользователь {message.from_user.id} не участвует в процессе стихотворения, но находится в состоянии waiting_for_poem_line")
                 await state.clear()
+                await message.answer("❌ Произошла ошибка с состоянием. Попробуйте начать заново.")
+                return
+
+            logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} участвует в процессе стихотворения, обрабатываем строку...")
+            result = await self.poem_manager.process_poem_line(message, state)
+            
+            if result:
+                logging.info(f"🎭 [POEM] Строка стихотворения от пользователя {message.from_user.id} успешно обработана")
+                
+                # Если result - это список завершивших пользователей, очищаем их из active_blocks
+                if isinstance(result, list) and result:
+                    logging.info(f"🎭 [POEM] Завершили стихотворение пользователи: {result}")
+                    for completed_user_id in result:
+                        # Находим chat_id для каждого пользователя
+                        self.cur.execute("SELECT chat_id FROM answers WHERE user_id = ?", (completed_user_id,))
+                        chat_result = self.cur.fetchone()
+                        if chat_result:
+                            chat_id = chat_result[0]
+                            user_key = f"{chat_id}_{completed_user_id}"
+                            if user_key in self.active_blocks:
+                                del self.active_blocks[user_key]
+                                logging.info(f"🎭 [POEM] Убран пользователь {completed_user_id} из active_blocks")
+                
+                # НЕ проверяем завершение здесь - это должно происходить только после завершения всего стихотворения
+                # Возвращаем True чтобы показать что строка обработана успешно
+                return True
+            else:
+                logging.error(f"🎭 [POEM] Ошибка при обработке строки стихотворения от пользователя {message.from_user.id}")
 
         # 4. УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК - ОБЯЗАТЕЛЬНО ПОСЛЕДНИЙ!
         @self.router.message()
         async def handle_message_without_state(message: types.Message, state: FSMContext):
             current_state = await state.get_state()
+            #
+            # Добавляем логирование для отладки
+            logging.info(
+                f"Универсальный обработчик: user_id={message.from_user.id}, state={current_state}, text={message.text[:50] if message.text else 'no text'}")
+            
+            # Проверяем active_blocks для отладки
+            user_key = f"{message.chat.id}_{message.from_user.id}"
+            if user_key in self.active_blocks:
+                logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} найден в active_blocks с индексом {self.active_blocks[user_key]}")
+            else:
+                logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} НЕ найден в active_blocks")
+            #
+            # Дополнительная проверка: если пользователь в блоке стихотворения, но состояние потеряно
+            if current_state is None:
+                self.cur.execute("SELECT current_block FROM answers WHERE chat_id=? AND user_id=?", 
+                                (message.chat.id, message.from_user.id))
+                block_result = self.cur.fetchone()
+                
+                if block_result and block_result[0] == 5:  # Блок стихотворения
+                    # Проверяем, участвует ли пользователь в процессе стихотворения
+                    if self.poem_manager.is_user_in_poem_process(message.from_user.id):
+                        logging.info(f"🎭 [POEM] Восстановление состояния стихотворения для пользователя {message.from_user.id} (состояние None, но участвует в процессе)")
+                        user_key = f"{message.chat.id}_{message.from_user.id}"
+                        
+                        # Добавляем в active_blocks если его там нет
+                        if user_key not in self.active_blocks:
+                            self.active_blocks[user_key] = 5
+                            logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} добавлен в active_blocks")
+                        
+                        # НЕ отправляем сообщение "Продолжайте стихотворение" - это дублирует основное сообщение
+                        # Восстанавливаем состояние и передаем обработку в poem_manager
+                        await state.set_state(TeamPoemState.waiting_for_poem_line)
+                        current_state = await state.get_state()
+                        # НЕ возвращаемся, а продолжаем обработку сообщения
+                    else:
+                        logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} не участвует в процессе стихотворения, пропускаем восстановление")
+            #
+            # Проверяем, не находится ли пользователь в состоянии ожидания строки стихотворения
+            if current_state == TeamPoemState.waiting_for_poem_line.state:
+                logging.info(f"🎭 [POEM] Универсальный обработчик: восстановление состояния стихотворения для пользователя {message.from_user.id}")
+                # Передаем обработку в poem_manager
+                result = await self.poem_manager.process_poem_line(message, state)
+                if result:
+                    # Если result - это список завершивших пользователей, очищаем их из active_blocks
+                    if isinstance(result, list) and result:
+                        logging.info(f"🎭 [POEM] Универсальный обработчик: завершили стихотворение пользователи: {result}")
+                        for completed_user_id in result:
+                            # Находим chat_id для каждого пользователя
+                            self.cur.execute("SELECT chat_id FROM answers WHERE user_id = ?", (completed_user_id,))
+                            chat_result = self.cur.fetchone()
+                            if chat_result:
+                                chat_id = chat_result[0]
+                                user_key = f"{chat_id}_{completed_user_id}"
+                                if user_key in self.active_blocks:
+                                    del self.active_blocks[user_key]
+                                    logging.info(f"🎭 [POEM] Универсальный обработчик: убран пользователь {completed_user_id} из active_blocks")
+                    
+                # НЕ проверяем завершение здесь - это должно происходить только после завершения всего стихотворения
+                return
+            #
+            # Проверяем, завершил ли пользователь все задания
+            # НО сначала проверяем, не участвует ли он в процессе стихотворения
+            if self.poem_manager.is_user_in_poem_process(message.from_user.id):
+                logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} участвует в процессе стихотворения, пропускаем проверку завершения")
+                # Пропускаем проверку завершения для участников стихотворения
+                pass
+            else:
+                self.cur.execute(
+                    "SELECT current_block FROM answers WHERE user_id = ? AND chat_id = ?",
+                    (message.from_user.id, message.chat.id)
+                )
+                result = self.cur.fetchone()
 
+                if result and result[0] >= 6:  # Пользователь завершил все задания
+                    await message.answer(
+                        "📊 Вы уже завершили все задания корпоративной игры!\n\n"
+                        "Ожидайте объявления результатов в конце мероприятия. "
+                        "Если у вас есть вопросы, обратитесь к организаторам."
+                    )
+                    return
+            #
             if current_state == BotState.asking.state:
                 await self.process_answer(message, state)
                 return
-
+            #
             self.cur.execute("SELECT is_active, current_block FROM answers WHERE chat_id=? AND user_id=?",
                              (message.chat.id, message.from_user.id))
             result = self.cur.fetchone()
@@ -581,6 +759,17 @@ class InteractiveBot:
 
                 if user_key in self.active_blocks:
                     active_block_index = self.active_blocks[user_key]
+                    
+                    # Если это блок стихотворения, восстанавливаем состояние стихотворения
+                    if active_block_index == 5:
+                        logging.info(f"🎭 [POEM] Восстановление состояния стихотворения для пользователя {message.from_user.id}")
+                        await state.set_state(TeamPoemState.waiting_for_poem_line)
+                        logging.info(state.get_state())
+                        # НЕ отправляем сообщение "Продолжайте стихотворение" - это дублирует основное сообщение
+                        # Восстанавливаем состояние и передаем обработку в poem_manager
+                        # НЕ возвращаемся, а продолжаем обработку сообщения
+                    
+                    # Для обычных блоков вопросов
                     data = await state.get_data()
 
                     if not data.get("block_questions") or data.get("quiz_index") != active_block_index:
@@ -600,6 +789,21 @@ class InteractiveBot:
                     await self.process_answer(message, state)
                 else:
                     logging.warning(f"Пользователь {message.from_user.id} активен в БД, но нет активного блока")
+                    
+                    # Проверяем, может ли это быть блок стихотворения
+                    if result[1] == 5:  # current_block == 5
+                        # Проверяем, участвует ли пользователь в процессе стихотворения
+                        if self.poem_manager.is_user_in_poem_process(message.from_user.id):
+                            logging.info(f"🎭 [POEM] Восстановление состояния стихотворения для пользователя {message.from_user.id} (блок 5, участвует в процессе)")
+                            # Добавляем пользователя в active_blocks
+                            self.active_blocks[user_key] = 5
+                            
+                            # НЕ отправляем сообщение "Продолжайте стихотворение" - это дублирует основное сообщение
+                            # Просто восстанавливаем состояние и передаем обработку в poem_manager
+                            await state.set_state(TeamPoemState.waiting_for_poem_line)
+                            return
+                        else:
+                            logging.info(f"🎭 [POEM] Пользователь {message.from_user.id} не участвует в процессе стихотворения, пропускаем восстановление")
 
     async def download_photo_by_file_id(self, photo_file_id, username):
         file = await self.bot.get_file(photo_file_id)
@@ -856,6 +1060,76 @@ class InteractiveBot:
                 logging.info(f"Пользователь {user_id} уже активен в блоке {self.active_blocks[user_key]}")
                 return
 
+            # Если это блок стихотворения (индекс 5)
+            if block_index == 5:
+                logging.info(f"Попытка запуска блока стихотворения для пользователя {user_id}")
+                
+                # Получаем команду пользователя
+                self.cur.execute("SELECT team FROM answers WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
+                result = self.cur.fetchone()
+
+                if result:
+                    team = result[0]
+                    logging.info(f"Пользователь {user_id} из команды {team}")
+
+                    # Обновляем БД - помечаем что пользователь готов
+                    self.cur.execute(
+                        "UPDATE answers SET current_block=5 WHERE user_id = ? AND chat_id = ?",
+                        (user_id, chat_id)
+                    )
+                    self.conn.commit()
+
+                    # Проверяем готовность команды и запускаем стихотворение
+                    poem_started = await self.poem_manager.check_team_readiness_and_start(team)
+
+                    if poem_started:
+                        # Проверяем, участвует ли конкретно этот пользователь в процессе
+                        if self.poem_manager.is_user_in_poem_process(user_id):
+                            logging.info(f"Пользователь {user_id} сразу участвует в стихотворении команды {team}")
+                            # Устанавливаем состояние для ожидания строки стихотворения
+                            state = FSMContext(self.dp.storage, key=("bot", str(chat_id), str(user_id)))
+                            await state.set_state(TeamPoemState.waiting_for_poem_line)
+
+                            # Добавляем пользователя в active_blocks для отслеживания состояния
+                            self.active_blocks[user_key] = 5  # Индекс блока стихотворения
+
+                            # Обновляем БД
+                            self.cur.execute(
+                                "UPDATE answers SET is_active=1 WHERE user_id = ? AND chat_id = ?",
+                                (user_id, chat_id)
+                            )
+                            self.conn.commit()
+
+                            logging.info(f"Пользователь {user_id} добавлен в процесс стихотворения команды {team} и в active_blocks")
+                        else:
+                            logging.info(f"Пользователь {user_id} будет участвовать в стихотворении команды {team} позже")
+                            # Добавляем пользователя в active_blocks даже если он ждет своей очереди
+                            self.active_blocks[user_key] = 5
+                            
+                            # Обновляем БД
+                            self.cur.execute(
+                                "UPDATE answers SET is_active=1 WHERE user_id = ? AND chat_id = ?",
+                                (user_id, chat_id)
+                            )
+                            self.conn.commit()
+                            
+                            # Пользователь будет участвовать когда придёт его очередь
+                            await self.bot.send_message(
+                                chat_id,
+                                "✅ Командное стихотворение уже началось!\n"
+                                "Ожидайте своей очереди для добавления строки."
+                            )
+                        return
+                    else:
+                        logging.info(f"Команда {team} еще не готова к стихотворению")
+                        # Если команда еще не готова, отправляем сообщение ожидания
+                        await self.bot.send_message(
+                            chat_id,
+                            "⏳ Ваша команда еще не готова к выполнению командного задания.\n"
+                            "Дождитесь, пока все участники команды завершат предыдущие блоки."
+                        )
+                        return
+
             block = questions[block_index]
             questions_block = block["text"]
 
@@ -1005,21 +1279,70 @@ class InteractiveBot:
             await state.update_data(answers=answers)
             await self.save_answers(message, answers, state)
 
+            # Если это блок 4 (последний перед стихотворением)
+            if quiz_index == 4:
+                # Получаем команду пользователя
+                self.cur.execute("SELECT team FROM answers WHERE user_id = ? AND chat_id = ?",
+                                 (message.from_user.id, message.chat.id))
+                result = self.cur.fetchone()
+
+                if result:
+                    team = result[0]
+                    logging.info(f"Пользователь {message.from_user.id} завершил блок 4, команда: {team}")
+
+                    # Обновляем БД - помечаем что пользователь готов к стихотворению
+                    self.cur.execute(
+                        "UPDATE answers SET current_block=5, is_active=0 WHERE user_id = ? AND chat_id = ?",
+                        (message.from_user.id, message.chat.id)
+                    )
+                    self.conn.commit()
+
+                    # Проверяем готовность команды к стихотворению
+                    poem_started = await self.poem_manager.check_team_readiness_and_start(team)
+
+                    if poem_started:
+                        # Если процесс уже запущен или только что запустился
+                        # Проверяем, участвует ли конкретно этот пользователь
+                        if self.poem_manager.is_user_in_poem_process(message.from_user.id):
+                            logging.info(f"Пользователь {message.from_user.id} сразу участвует в стихотворении")
+                            # Очищаем старое состояние перед установкой нового
+                            await state.clear()
+                            # Устанавливаем состояние для ожидания строки
+                            await state.set_state(TeamPoemState.waiting_for_poem_line)
+
+                            # Обновляем БД
+                            self.cur.execute(
+                                "UPDATE answers SET is_active=1 WHERE user_id = ? AND chat_id = ?",
+                                (message.from_user.id, message.chat.id)
+                            )
+                            self.conn.commit()
+                            return
+                        else:
+                            logging.info(f"Пользователь {message.from_user.id} будет участвовать в стихотворении позже")
+                            # Пользователь будет участвовать в процессе когда придёт его очередь
+                            await message.answer(
+                                "✅ Вы завершили предыдущие задания!\n"
+                                "Командное стихотворение уже началось. "
+                                "Ожидайте своей очереди для добавления строки."
+                            )
+                    else:
+                        logging.info(f"Команда {team} еще не готова к стихотворению")
+                        await message.answer(
+                            "⏳ Ваша команда еще не готова к выполнению командного задания.\n"
+                            "Дождитесь, пока все участники команды завершат предыдущие блоки.\n"
+                            "Вы получите уведомление, когда задание станет доступным."
+                        )
+
+                # Помечаем пользователя как неактивного
+                user_key = f"{message.chat.id}_{message.from_user.id}"
+                if user_key in self.active_blocks:
+                    del self.active_blocks[user_key]
+
+                await state.clear()
+                return
+
             # Проверяем, есть ли следующий доступный блок
             next_block_started = await self.try_start_immediate_next_block(message, state, quiz_index)
-
-            # Если это последний блок (стихотворение), запускаем особую логику
-            if quiz_index == 4:  # Индекс последнего блока со стихотворением
-                # Проверяем, не нужно ли запустить командное стихотворение
-                poem_started = await self.poem_manager.check_and_start_poem_for_user(
-                    message.from_user.id,
-                    message.chat.id
-                )
-
-                if poem_started:
-                    # Устанавливаем специальное состояние для ожидания строки
-                    await state.set_state(TeamPoemState.waiting_for_poem_line)
-                    return
 
             if not next_block_started:
                 # Проверяем, все ли блоки завершены
