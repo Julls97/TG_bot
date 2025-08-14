@@ -145,7 +145,7 @@ class InteractiveBot:
         self.router = Router()
         self.dp.include_router(self.router)
         self._init_db()
-        self.poem_manager = TeamPoemManager(self.bot, self.conn)
+        self.poem_manager = TeamPoemManager(self.bot, self.conn, dp=self.dp)
 
         self.bot_active = True
 
@@ -259,7 +259,7 @@ class InteractiveBot:
 
             # Достаем нужные 3 поля из БД
             self.cur.execute("""
-                             SELECT username, full_name, fio, is_active
+                             SELECT username, full_name, fio, team, is_active
                              FROM answers
                              """)
             rows = self.cur.fetchall()
@@ -270,10 +270,10 @@ class InteractiveBot:
 
             # Формируем красивый список
             text_lines = []
-            for idx, (username, full_name, fio, is_active) in enumerate(rows, start=1):
+            for idx, (username, full_name, fio, team, is_active) in enumerate(rows, start=1):
                 uname = f"@{username}" if username else "—"
                 active_status = "✅" if is_active == 1 else "❌"
-                text_lines.append(f"{idx}. {uname} | {full_name} | {fio} | Активен: {active_status}")
+                text_lines.append(f"{idx}. {uname} | {full_name} | {fio} | {team} | Активен: {active_status}")
 
             # Склеиваем в одно сообщение (проверим лимит в 4096 символов Telegram)
             text = "\n".join(text_lines)
