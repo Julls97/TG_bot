@@ -614,6 +614,37 @@ class InteractiveBot:
             f.write(file_bytes.getvalue())
         return destination
 
+    async def set_bot_commands(self):
+        """Устанавливает меню команд для бота"""
+        commands = [
+            types.BotCommand(command="start", description="🚀 Начать игру"),
+            types.BotCommand(command="schedule", description="📅 Расписание мероприятия"),
+        ]
+
+        # Команды для обычных пользователей
+        await self.bot.set_my_commands(commands)
+
+        # Дополнительные команды для администратора
+        admin_commands = commands + [
+            types.BotCommand(command="help_admin", description="👨‍💼 Админ команды"),
+            types.BotCommand(command="results", description="📊 Все результаты"),
+            types.BotCommand(command="export", description="📤 Экспорт в таблицу"),
+            types.BotCommand(command="send_schedule", description="📢 Разослать расписание"),
+            types.BotCommand(command="download_all_photos", description="📸 Скачать все фото"),
+            types.BotCommand(command="get_all_photos", description="📸 Все фото"),
+            types.BotCommand(command="get_photo", description="📸 Фото по id"),
+            types.BotCommand(command="quiz_list", description="Список блоков"),
+            types.BotCommand(command="block", description="Посмотреть вопросы из выбранного блока"),
+            types.BotCommand(command="bd_users", description="👨‍💼 Посмотреть данные из БД"),
+            types.BotCommand(command="bd_clear", description="‍👨‍💼 Удалить данные из БД"),
+            types.BotCommand(command="finish_game", description="Завершить игру досрочно"),
+        ]
+
+        await self.bot.set_my_commands(
+            commands=admin_commands,
+            scope=types.BotCommandScopeChat(chat_id=ADMIN_ID)
+        )
+
 # -----------------------------------------------------------------------------------------------------------------
     async def name(self, message: Message):
         await message.answer("Дорогой коллега, приветствую тебя в корпоративной игре, которая проводится в рамках мероприятия «Традиции и трансформация». 🎉")
@@ -1028,6 +1059,7 @@ class InteractiveBot:
     async def main(self):
         try:
             logging.info("Бот запускается...")
+            await self.set_bot_commands()
             await self.dp.start_polling(self.bot)
         finally:
             self.conn.close()
